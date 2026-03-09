@@ -33,8 +33,30 @@ impl GitContext {
 
         let current_branch = get_branch(&root)?;
         let recent_commits = get_recent_commits(&root, 10)?;
-        let staged_diff = run_git(&root, &["diff", "--cached", "--stat", "-p", "--no-color"])?;
-        let unstaged_diff = run_git(&root, &["diff", "--stat", "-p", "--no-color"])?;
+        // Use --no-ext-diff to bypass external diff tool (like difft)
+        let staged_diff = run_git(
+            &root,
+            &[
+                "--no-pager",
+                "diff",
+                "--no-ext-diff",
+                "--cached",
+                "--stat",
+                "-p",
+                "--no-color",
+            ],
+        )?;
+        let unstaged_diff = run_git(
+            &root,
+            &[
+                "--no-pager",
+                "diff",
+                "--no-ext-diff",
+                "--stat",
+                "-p",
+                "--no-color",
+            ],
+        )?;
         let (staged_files, untracked_files) = get_status(&root)?;
 
         Ok(GitContext {
@@ -81,14 +103,14 @@ impl GitContext {
         if !self.staged_diff.is_empty() {
             out.push_str("Staged diff:\n```diff\n");
             // Truncate very large diffs to avoid token overflows
-            let diff = truncate_diff(&self.staged_diff, 8000);
+            let diff = truncate_diff(&self.staged_diff, 12000);
             out.push_str(&diff);
             out.push_str("\n```\n\n");
         }
 
         if !self.unstaged_diff.is_empty() {
             out.push_str("Unstaged diff (for context):\n```diff\n");
-            let diff = truncate_diff(&self.unstaged_diff, 4000);
+            let diff = truncate_diff(&self.unstaged_diff, 8000);
             out.push_str(&diff);
             out.push_str("\n```\n\n");
         }
@@ -198,10 +220,10 @@ fn run_git(root: &str, args: &[&str]) -> Result<String> {
 
 /// Truncate a diff to approximately `max_chars` characters, preserving structure.
 fn truncate_diff(diff: &str, max_chars: usize) -> String {
-    if diff.len() <= max_chars {
+    if diff.chars().count() <= max_chars {
         return diff.to_string();
     }
-    let truncated = &diff[..max_chars];
+    let truncated: String = diff.chars().take(max_chars).collect();
     format!(
         "{}\n\n... [diff truncated at {} chars, {} total] ...",
         truncated,
