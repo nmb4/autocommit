@@ -4,12 +4,29 @@ use serde::{Deserialize, Serialize};
 const BASE_URL: &str = "https://api.inceptionlabs.ai/v1";
 const MODEL: &str = "mercury-2";
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    #[serde(rename = "instant")]
+    Instant,
+    Low,
+    High,
+}
+
+impl Default for ReasoningEffort {
+    fn default() -> Self {
+        ReasoningEffort::Instant
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct ChatRequest {
     model: String,
     messages: Vec<Message>,
     max_tokens: u32,
     temperature: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -45,13 +62,19 @@ impl ApiClient {
         }
     }
 
-    pub async fn generate_commits(&self, git_context: &str) -> Result<String> {
+    pub async fn generate_commits(&self, git_context: &str, reasoning_effort: ReasoningEffort) -> Result<String> {
         let system_prompt = SYSTEM_PROMPT.trim().to_string();
 
         let user_message = format!(
             "Here is the current git repository state:\n\n{}\n\nPlease analyze this and generate the appropriate git commands.",
             git_context
         );
+
+        let reason_effort_str = match reasoning_effort {
+            ReasoningEffort::Instant => None,
+            ReasoningEffort::Low => Some("low".to_string()),
+            ReasoningEffort::High => Some("high".to_string()),
+        };
 
         let request = ChatRequest {
             model: self.model.clone(),
@@ -67,6 +90,7 @@ impl ApiClient {
             ],
             max_tokens: 2048,
             temperature: 0.2,
+            reasoning_effort: reason_effort_str,
         };
 
         let url = format!("{}/chat/completions", self.base_url);

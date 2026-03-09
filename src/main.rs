@@ -11,6 +11,24 @@ use parser::{ExecutionStep, ParseResult};
 use std::process::Command;
 use std::time::Duration;
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+enum ReasoningEffortArg {
+    Instant,
+    Low,
+    High,
+}
+
+impl From<ReasoningEffortArg> for api::ReasoningEffort {
+    fn from(arg: ReasoningEffortArg) -> Self {
+        match arg {
+            ReasoningEffortArg::Instant => api::ReasoningEffort::Instant,
+            ReasoningEffortArg::Low => api::ReasoningEffort::Low,
+            ReasoningEffortArg::High => api::ReasoningEffort::High,
+        }
+    }
+}
+
 /// autocommit — AI-powered git commit message generator
 ///
 /// Analyzes your repository's staged and unstaged changes, then uses the
@@ -40,6 +58,10 @@ struct Args {
     /// Override the model name (default: mercury-coder)
     #[arg(long, env = "AUTOCOMMIT_MODEL")]
     model: Option<String>,
+
+    /// Reasoning effort: instant (default), low, or high
+    #[arg(long, value_enum, default_value = "instant")]
+    reasoning: ReasoningEffortArg,
 
     /// Skip confirmation prompt and execute immediately
     #[arg(short = 'y', long)]
@@ -100,7 +122,7 @@ async fn run() -> Result<()> {
     // ── 2. Call the model ────────────────────────────────────────────────────
     let sp2 = spinner("Asking Mercury to analyze your changes...");
     let client = api::ApiClient::new(args.api_key.clone(), args.base_url.clone(), args.model.clone());
-    let raw_output = client.generate_commits(&prompt).await?;
+    let raw_output = client.generate_commits(&prompt, args.reasoning.into()).await?;
     sp2.finish_and_clear();
 
     if args.dry_run {
