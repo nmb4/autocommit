@@ -102,17 +102,28 @@ impl GitContext {
 
         if !self.staged_diff.is_empty() {
             out.push_str("Staged diff:\n```diff\n");
-            // Truncate very large diffs to avoid token overflows
-            let diff = truncate_diff(&self.staged_diff, 12000);
-            out.push_str(&diff);
-            out.push_str("\n```\n\n");
+            let pages = chunk_diff_by_file(&self.staged_diff, 32000);
+            for (i, page) in pages.iter().enumerate() {
+                if pages.len() > 1 {
+                    out.push_str(&format!("=== DIFF PAGE {}/{} ===\n\n", i + 1, pages.len()));
+                }
+                out.push_str(page);
+                out.push_str("\n");
+            }
+            out.push_str("```\n\n");
         }
 
         if !self.unstaged_diff.is_empty() {
             out.push_str("Unstaged diff (for context):\n```diff\n");
-            let diff = truncate_diff(&self.unstaged_diff, 8000);
-            out.push_str(&diff);
-            out.push_str("\n```\n\n");
+            let pages = chunk_diff_by_file(&self.unstaged_diff, 32000);
+            for (i, page) in pages.iter().enumerate() {
+                if pages.len() > 1 {
+                    out.push_str(&format!("=== DIFF PAGE {}/{} ===\n\n", i + 1, pages.len()));
+                }
+                out.push_str(page);
+                out.push_str("\n");
+            }
+            out.push_str("```\n\n");
         }
 
         out
@@ -230,4 +241,51 @@ fn truncate_diff(diff: &str, max_chars: usize) -> String {
         max_chars,
         diff.len()
     )
+}
+
+/// Split a diff into pages, keeping each file's diff intact.
+/// Returns a vector of diff pages that each fit within max_chars.
+fn chunk_diff_by_file(diff: &str, max_chars: usize) -> Vec<String> {
+    if diff.chars().count() <= max_chars {
+        return vec![diff.to_string()];
+    }
+
+    let mut pages = Vec::new();
+    let mut current_page = String::new();
+
+    for line in diff.lines() {
+        let line_len = line.chars().count();
+
+        // Check if adding this line would exceed the limit
+        if current_page.chars().count() + line_len > max_chars {
+            // If we have content, save current page
+            if !current_page.is_empty() {
+                pages.push(current_page.clone());
+                current_page.clear();
+            }
+        }
+
+        // If this is a file header, prefer to start a new page if current is half full
+        if line.starts_with("diff --git") || line.starts_with("--- ") || line.starts_with("+++ ") {
+            if !current_page.is_empty() && current_page.chars().count() > max_chars / 2 {
+                pages.push(current_page.clone());
+                current_page.clear();
+            }
+        }
+
+        current_page.push_str(line);
+        current_page.push('\n');
+    }
+
+    // Push remaining content
+    if !current_page.is_empty() {
+        pages.push(current_page);
+    }
+
+    // Edge case: if everything is in one huge file, just return truncated
+    if pages.is_empty() {
+        return vec![truncate_diff(diff, max_chars)];
+    }
+
+    pages
 }
