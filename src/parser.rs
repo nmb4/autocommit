@@ -10,13 +10,14 @@ pub struct GitCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandKind {
     Add { paths: Vec<String> },
+    Reset { paths: Vec<String> },
     Commit { message: String },
     Comment,
     Other,
 }
 
 /// A logical commit group: one or more `git add` commands followed by a `git commit`
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CommitGroup {
     pub files: Vec<String>,
     pub message: String,
@@ -24,7 +25,15 @@ pub struct CommitGroup {
     pub commit_command: GitCommand,
 }
 
-/// Parse the model's shell output into structured commit groups.
+/// A top-level execution step: either a standalone command (like git reset)
+/// or a commit group
+#[derive(Debug, Clone)]
+pub enum ExecutionStep {
+    Reset(GitCommand),
+    CommitGroup(CommitGroup),
+}
+
+/// Parse the model's shell output into structured execution steps.
 pub fn parse_commands(output: &str) -> Result<ParseResult> {
     let shell_block = extract_shell_block(output).unwrap_or(output);
 
@@ -48,18 +57,18 @@ pub fn parse_commands(output: &str) -> Result<ParseResult> {
         return Ok(ParseResult::NothingToCommit);
     }
 
-    // Group into (add*, commit) sequences
-    let groups = group_commands(&commands)?;
+    // Group into execution steps (resets + commit groups)
+    let steps = group_into_steps(&commands)?;
 
-    if groups.is_empty() {
+    if steps.is_empty() {
         return Ok(ParseResult::NothingToCommit);
     }
 
-    Ok(ParseResult::Commits(groups))
+    Ok(ParseResult::Steps(steps))
 }
 
 pub enum ParseResult {
-    Commits(Vec<CommitGroup>),
+    Steps(Vec<ExecutionStep>),
     NothingToCommit,
 }
 
@@ -96,6 +105,20 @@ fn parse_single_command(line: &str) -> GitCommand {
         };
     }
 
+    // git reset (unstage) - e.g., git reset HEAD file.rb or git reset file.rb
+    if let Some(rest) = line.strip_prefix("git reset ") {
+        let args: Vec<&str> = rest.split_whitespace().collect();
+        let paths: Vec<String> = args
+            .iter()
+            .skip_while(|s| **s == "HEAD" || s.starts_with('-'))
+            .map(|s| s.to_string())
+            .collect();
+        return GitCommand {
+            raw: line.to_string(),
+            kind: CommandKind::Reset { paths },
+        };
+    }
+
     if let Some(rest) = line.strip_prefix("git commit -m ") {
         let message = unquote(rest.trim());
         return GitCommand {
@@ -120,13 +143,23 @@ fn parse_single_command(line: &str) -> GitCommand {
     }
 }
 
-fn group_commands(commands: &[GitCommand]) -> Result<Vec<CommitGroup>> {
-    let mut groups = Vec::new();
+fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
+    let mut steps = Vec::new();
     let mut pending_adds: Vec<GitCommand> = Vec::new();
     let mut pending_files: Vec<String> = Vec::new();
 
     for cmd in commands {
         match &cmd.kind {
+            CommandKind::Reset { .. } => {
+                // Flush any pending adds before the reset
+                if !pending_adds.is_empty() {
+                    let group = build_commit_group(&pending_adds, "", &pending_files);
+                    steps.push(ExecutionStep::CommitGroup(group));
+                    pending_adds.clear();
+                    pending_files.clear();
+                }
+                steps.push(ExecutionStep::Reset(cmd.clone()));
+            }
             CommandKind::Add { paths } => {
                 pending_adds.push(cmd.clone());
                 pending_files.extend(paths.clone());
@@ -135,12 +168,8 @@ fn group_commands(commands: &[GitCommand]) -> Result<Vec<CommitGroup>> {
                 if pending_adds.is_empty() && pending_files.is_empty() {
                     // Commit without explicit adds — implies "all staged"
                 }
-                groups.push(CommitGroup {
-                    files: pending_files.clone(),
-                    message: message.clone(),
-                    add_commands: pending_adds.clone(),
-                    commit_command: cmd.clone(),
-                });
+                let group = build_commit_group(&pending_adds, message, &pending_files);
+                steps.push(ExecutionStep::CommitGroup(group));
                 pending_adds.clear();
                 pending_files.clear();
             }
@@ -148,7 +177,25 @@ fn group_commands(commands: &[GitCommand]) -> Result<Vec<CommitGroup>> {
         }
     }
 
-    Ok(groups)
+    // Flush any remaining pending adds
+    if !pending_adds.is_empty() {
+        let group = build_commit_group(&pending_adds, "", &pending_files);
+        steps.push(ExecutionStep::CommitGroup(group));
+    }
+
+    Ok(steps)
+}
+
+fn build_commit_group(add_commands: &[GitCommand], message: &str, files: &[String]) -> CommitGroup {
+    CommitGroup {
+        files: files.to_vec(),
+        message: message.to_string(),
+        add_commands: add_commands.to_vec(),
+        commit_command: GitCommand {
+            raw: "".to_string(),
+            kind: CommandKind::Other,
+        },
+    }
 }
 
 /// Strip surrounding quotes from a string

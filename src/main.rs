@@ -7,7 +7,7 @@ use clap::Parser;
 use colored::Colorize;
 use dialoguer::Confirm;
 use indicatif::{ProgressBar, ProgressStyle};
-use parser::{CommitGroup, ParseResult};
+use parser::{ExecutionStep, ParseResult};
 use std::process::Command;
 use std::time::Duration;
 
@@ -121,52 +121,60 @@ async fn run() -> Result<()> {
             );
             return Ok(());
         }
-        ParseResult::Commits(groups) => {
-            run_commit_plan(&args, &groups, &ctx.repo_root).await?;
+        ParseResult::Steps(steps) => {
+            run_execution_plan(&args, &steps, &ctx.repo_root).await?;
         }
     }
 
     Ok(())
 }
 
-async fn run_commit_plan(
+async fn run_execution_plan(
     args: &Args,
-    groups: &[CommitGroup],
+    steps: &[ExecutionStep],
     repo_root: &str,
 ) -> Result<()> {
+    let commit_count = steps.iter().filter(|s| matches!(s, ExecutionStep::CommitGroup(_))).count();
+
     // ── Display plan ─────────────────────────────────────────────────────────
     println!();
     println!(
-        "{} {} commit{} planned:",
+        "{} {} step{} planned ({} commit{}):",
         "●".cyan().bold(),
-        groups.len(),
-        if groups.len() == 1 { "" } else { "s" }
+        steps.len(),
+        if steps.len() == 1 { "" } else { "s" },
+        commit_count,
+        if commit_count == 1 { "" } else { "s" }
     );
     println!();
 
-    for (i, group) in groups.iter().enumerate() {
-        let num = format!("[{}/{}]", i + 1, groups.len()).dimmed();
-        println!("  {} {}", num, group.message.green().bold());
-
-        if !group.files.is_empty() {
-            for file in &group.files {
-                println!("      {} {}", "+".cyan(), file.dimmed());
+    for (i, step) in steps.iter().enumerate() {
+        let num = format!("[{}/{}]", i + 1, steps.len()).dimmed();
+        
+        match step {
+            ExecutionStep::Reset(cmd) => {
+                println!("  {} {} Unstage files:", num, "↺".yellow().bold());
+                println!("      {}", cmd.raw.dimmed());
+            }
+            ExecutionStep::CommitGroup(group) => {
+                println!("  {} {} Commit:", num, "📦".green().bold());
+                println!("      {}", group.message.green().bold());
+                for file in &group.files {
+                    println!("      {} {}", "+".cyan(), file.dimmed());
+                }
+                for cmd in &group.add_commands {
+                    println!("      {}", cmd.raw.dimmed());
+                }
+                println!("      {}", group.commit_command.raw.dimmed());
             }
         }
-
-        println!();
-        // Show actual commands
-        for cmd in &group.add_commands {
-            println!("      {}", cmd.raw.dimmed());
-        }
-        println!("      {}", group.commit_command.raw.dimmed());
         println!();
     }
 
     // ── Confirm ──────────────────────────────────────────────────────────────
     if !args.yes {
         let confirmed = Confirm::new()
-            .with_prompt("Execute these commits?")
+            .with_prompt("Execute these steps?")
             .default(true)
             .interact()
             .context("Prompt failed")?;
@@ -177,45 +185,52 @@ async fn run_commit_plan(
         }
     }
 
-    // ── Execute ──────────────────────────────────────────────────────────────
+    // ── Execute ─────────────────────────────────────────────────────────────
     println!();
-    for (i, group) in groups.iter().enumerate() {
-        let label = format!("[{}/{}]", i + 1, groups.len());
+    
+    for (i, step) in steps.iter().enumerate() {
+        let label = format!("[{}/{}]", i + 1, steps.len());
 
-        // Run all add commands using the structured file list (avoids shell-splitting paths)
-        for add_cmd in &group.add_commands {
-            if let parser::CommandKind::Add { paths } = &add_cmd.kind {
-                let mut args_vec = vec!["add"];
-                args_vec.extend(paths.iter().map(|s| s.as_str()));
+        match step {
+            ExecutionStep::Reset(cmd) => {
+                let args_vec: Vec<&str> = cmd.raw.split_whitespace().skip(1).collect();
                 run_git_command(repo_root, &args_vec, &label)?;
+                println!("  {} {} Unstage", "↺".yellow().bold(), label.dimmed());
+            }
+            ExecutionStep::CommitGroup(group) => {
+                for add_cmd in &group.add_commands {
+                    if let parser::CommandKind::Add { paths } = &add_cmd.kind {
+                        let mut args_vec = vec!["add"];
+                        args_vec.extend(paths.iter().map(|s| s.as_str()));
+                        run_git_command(repo_root, &args_vec, &label)?;
+                    }
+                }
+
+                if group.add_commands.is_empty() && !group.files.is_empty() {
+                    let mut add_args = vec!["add"];
+                    let file_refs: Vec<&str> = group.files.iter().map(|s| s.as_str()).collect();
+                    add_args.extend(file_refs);
+                    run_git_command(repo_root, &add_args, &label)?;
+                }
+
+                run_git_command(repo_root, &["commit", "-m", &group.message], &label)?;
+
+                println!(
+                    "  {} {} {}",
+                    "✓".green().bold(),
+                    label.dimmed(),
+                    group.message.bold()
+                );
             }
         }
-
-        // If no explicit adds but we have files listed, add them
-        if group.add_commands.is_empty() && !group.files.is_empty() {
-            let mut add_args = vec!["add"];
-            let file_refs: Vec<&str> = group.files.iter().map(|s| s.as_str()).collect();
-            add_args.extend(file_refs);
-            run_git_command(repo_root, &add_args, &label)?;
-        }
-
-        // Run commit using the already-parsed message (never re-split the quoted string)
-        run_git_command(repo_root, &["commit", "-m", &group.message], &label)?;
-
-        println!(
-            "  {} {} {}",
-            "✓".green().bold(),
-            label.dimmed(),
-            group.message.bold()
-        );
     }
 
     println!();
     println!(
         "{} All done! {} commit{} created.",
         "✓".green().bold(),
-        groups.len(),
-        if groups.len() == 1 { "" } else { "s" }
+        commit_count,
+        if commit_count == 1 { "" } else { "s" }
     );
 
     Ok(())
