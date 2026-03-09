@@ -14,6 +14,7 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 #[value(rename_all = "lowercase")]
 enum ReasoningEffortArg {
+    Auto,
     Instant,
     Low,
     High,
@@ -22,9 +23,28 @@ enum ReasoningEffortArg {
 impl From<ReasoningEffortArg> for api::ReasoningEffort {
     fn from(arg: ReasoningEffortArg) -> Self {
         match arg {
+            ReasoningEffortArg::Auto => api::ReasoningEffort::Instant,
             ReasoningEffortArg::Instant => api::ReasoningEffort::Instant,
             ReasoningEffortArg::Low => api::ReasoningEffort::Low,
             ReasoningEffortArg::High => api::ReasoningEffort::High,
+        }
+    }
+}
+
+impl ReasoningEffortArg {
+    /// Resolve to actual reasoning effort, either using explicit choice or auto-detecting from diff volume.
+    fn resolve(self, diff_volume: usize) -> api::ReasoningEffort {
+        match self {
+            ReasoningEffortArg::Auto => {
+                if diff_volume > 2000 {
+                    api::ReasoningEffort::High
+                } else if diff_volume > 500 {
+                    api::ReasoningEffort::Low
+                } else {
+                    api::ReasoningEffort::Instant
+                }
+            }
+            _ => self.into(),
         }
     }
 }
@@ -59,8 +79,8 @@ struct Args {
     #[arg(long, env = "AUTOCOMMIT_MODEL")]
     model: Option<String>,
 
-    /// Reasoning effort: instant (default), low, or high
-    #[arg(short = 'r', long, value_enum, default_value = "instant")]
+    /// Reasoning effort: auto (default), instant, low, or high. Auto selects based on diff volume.
+    #[arg(short = 'r', long, value_enum, default_value = "auto")]
     reasoning: ReasoningEffortArg,
 
     /// Skip confirmation prompt and execute immediately
@@ -122,7 +142,8 @@ async fn run() -> Result<()> {
     // ── 2. Call the model ────────────────────────────────────────────────────
     let sp2 = spinner("Asking Mercury to analyze your changes...");
     let client = api::ApiClient::new(args.api_key.clone(), args.base_url.clone(), args.model.clone());
-    let raw_output = client.generate_commits(&prompt, args.reasoning.into()).await?;
+    let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
+    let raw_output = client.generate_commits(&prompt, reasoning_effort).await?;
     sp2.finish_and_clear();
 
     if args.dry_run {

@@ -70,6 +70,14 @@ impl GitContext {
         })
     }
 
+    /// Calculate the total volume of changes (staged + unstaged diffs).
+    /// Returns the total number of lines in both diffs.
+    pub fn diff_volume(&self) -> usize {
+        let staged_lines = self.staged_diff.lines().count();
+        let unstaged_lines = self.unstaged_diff.lines().count();
+        staged_lines + unstaged_lines
+    }
+
     /// Format the context into a prompt-friendly string.
     pub fn to_prompt(&self) -> String {
         let mut out = String::new();
