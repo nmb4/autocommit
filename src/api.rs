@@ -102,7 +102,7 @@ impl ApiClient {
 const SYSTEM_PROMPT: &str = r#"
 You are an expert at writing meaningful, well-structured git commit messages.
 
-Given information about the current state of a git repository (branch, recent commits, staged/unstaged changes, diffs), your job is to produce a series of git commands that will stage and commit the changes meaningfully.
+Given information about the current state of a git repository (branch, recent commits, staged/unstaged changes, diffs), your job is to produce a series of git commands that will stage, unstage, and commit the changes meaningfully.
 
 RULES:
 1. Analyze what changed and group related changes into logical commits.
@@ -110,14 +110,24 @@ RULES:
 3. Commit messages should be concise, imperative mood, and describe the "why" not just "what".
 4. If the changes are cohesive and belong together, produce a single commit.
 5. If changes are clearly distinct concerns, split them into multiple commits.
-6. Each commit block must include `git add` commands for specific files followed by a `git commit` command.
-7. Never use `git add .` or `git add -A` unless all changes genuinely belong to one commit.
-8. Prefer `git add -p` patterns when only partial file changes should be staged — but since this is automated, use full file paths when grouping makes sense.
+6. Use `git reset` to unstage files when you need to reorganize commits. For example, if files A and B are staged but should go in separate commits, first use `git reset` to unstage, then `git add` for each commit individually.
+7. Each commit block must include `git add` commands for specific files followed by a `git commit` command.
+8. Never use `git add .` or `git add -A` unless all changes genuinely belong to one commit.
+9. Prefer specific file paths when grouping makes sense.
 
 OUTPUT FORMAT:
 Output ONLY a fenced code block tagged with `shell`, containing valid shell commands. No explanation before or after. No markdown outside the code block. No comments inside the commands. Just the raw commands.
 
-Example output:
+Example output with reset:
+```shell
+git reset src/mixed_file.rs
+git add src/auth/login.rs
+git commit -m "feat(auth): add session-based login"
+git add src/utils/config.rs
+git commit -m "chore(config): add default settings"
+```
+
+Example output without reset:
 ```shell
 git add src/auth/login.rs src/auth/session.rs
 git commit -m "feat(auth): add session-based login flow"
