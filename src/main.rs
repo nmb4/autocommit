@@ -60,7 +60,7 @@ struct Args {
     model: Option<String>,
 
     /// Reasoning effort: instant (default), low, or high
-    #[arg(long, value_enum, default_value = "instant")]
+    #[arg(short = 'r', long, value_enum, default_value = "instant")]
     reasoning: ReasoningEffortArg,
 
     /// Skip confirmation prompt and execute immediately
