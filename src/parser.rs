@@ -1,0 +1,174 @@
+use anyhow::Result;
+
+/// A single parsed git command
+#[derive(Debug, Clone)]
+pub struct GitCommand {
+    pub raw: String,
+    pub kind: CommandKind,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommandKind {
+    Add { paths: Vec<String> },
+    Commit { message: String },
+    Comment,
+    Other,
+}
+
+/// A logical commit group: one or more `git add` commands followed by a `git commit`
+#[derive(Debug)]
+pub struct CommitGroup {
+    pub files: Vec<String>,
+    pub message: String,
+    pub add_commands: Vec<GitCommand>,
+    pub commit_command: GitCommand,
+}
+
+/// Parse the model's shell output into structured commit groups.
+pub fn parse_commands(output: &str) -> Result<ParseResult> {
+    let shell_block = extract_shell_block(output).unwrap_or(output);
+
+    let commands: Vec<GitCommand> = shell_block
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .map(parse_single_command)
+        .collect();
+
+    // Check for "nothing to commit" marker
+    let nothing = commands
+        .iter()
+        .any(|c| matches!(c.kind, CommandKind::Comment));
+
+    if nothing
+        && commands
+            .iter()
+            .all(|c| matches!(c.kind, CommandKind::Comment | CommandKind::Other))
+    {
+        return Ok(ParseResult::NothingToCommit);
+    }
+
+    // Group into (add*, commit) sequences
+    let groups = group_commands(&commands)?;
+
+    if groups.is_empty() {
+        return Ok(ParseResult::NothingToCommit);
+    }
+
+    Ok(ParseResult::Commits(groups))
+}
+
+pub enum ParseResult {
+    Commits(Vec<CommitGroup>),
+    NothingToCommit,
+}
+
+fn extract_shell_block(text: &str) -> Option<&str> {
+    // Find ```shell ... ``` or ```bash ... ``` or ``` ... ```
+    let starts = ["```shell\n", "```bash\n", "```\n"];
+    for start in &starts {
+        if let Some(begin) = text.find(start) {
+            let content_start = begin + start.len();
+            if let Some(end) = text[content_start..].find("```") {
+                return Some(&text[content_start..content_start + end]);
+            }
+        }
+    }
+    None
+}
+
+fn parse_single_command(line: &str) -> GitCommand {
+    if line.starts_with('#') {
+        return GitCommand {
+            raw: line.to_string(),
+            kind: CommandKind::Comment,
+        };
+    }
+
+    if let Some(rest) = line.strip_prefix("git add ") {
+        let paths = rest
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>();
+        return GitCommand {
+            raw: line.to_string(),
+            kind: CommandKind::Add { paths },
+        };
+    }
+
+    if let Some(rest) = line.strip_prefix("git commit -m ") {
+        let message = unquote(rest.trim());
+        return GitCommand {
+            raw: line.to_string(),
+            kind: CommandKind::Commit { message },
+        };
+    }
+
+    // Handle multi-flag variants like: git commit --message "..."  or  git commit -m "..."
+    if line.starts_with("git commit") {
+        if let Some(msg) = extract_commit_message(line) {
+            return GitCommand {
+                raw: line.to_string(),
+                kind: CommandKind::Commit { message: msg },
+            };
+        }
+    }
+
+    GitCommand {
+        raw: line.to_string(),
+        kind: CommandKind::Other,
+    }
+}
+
+fn group_commands(commands: &[GitCommand]) -> Result<Vec<CommitGroup>> {
+    let mut groups = Vec::new();
+    let mut pending_adds: Vec<GitCommand> = Vec::new();
+    let mut pending_files: Vec<String> = Vec::new();
+
+    for cmd in commands {
+        match &cmd.kind {
+            CommandKind::Add { paths } => {
+                pending_adds.push(cmd.clone());
+                pending_files.extend(paths.clone());
+            }
+            CommandKind::Commit { message } => {
+                if pending_adds.is_empty() && pending_files.is_empty() {
+                    // Commit without explicit adds — implies "all staged"
+                }
+                groups.push(CommitGroup {
+                    files: pending_files.clone(),
+                    message: message.clone(),
+                    add_commands: pending_adds.clone(),
+                    commit_command: cmd.clone(),
+                });
+                pending_adds.clear();
+                pending_files.clear();
+            }
+            CommandKind::Comment | CommandKind::Other => {}
+        }
+    }
+
+    Ok(groups)
+}
+
+/// Strip surrounding quotes from a string
+fn unquote(s: &str) -> String {
+    let s = s.trim();
+    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
+        s[1..s.len() - 1].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Extract commit message from various `git commit` flag forms
+fn extract_commit_message(line: &str) -> Option<String> {
+    // Try -m "..." or --message "..."
+    for flag in &[" -m ", " --message "] {
+        if let Some(pos) = line.find(flag) {
+            let rest = &line[pos + flag.len()..];
+            return Some(unquote(rest.trim()));
+        }
+    }
+    None
+}
