@@ -182,10 +182,13 @@ async fn run_commit_plan(
     for (i, group) in groups.iter().enumerate() {
         let label = format!("[{}/{}]", i + 1, groups.len());
 
-        // Run all add commands
+        // Run all add commands using the structured file list (avoids shell-splitting paths)
         for add_cmd in &group.add_commands {
-            let args_vec: Vec<&str> = add_cmd.raw.split_whitespace().skip(1).collect(); // skip "git"
-            run_git_command(repo_root, &args_vec, &label)?;
+            if let parser::CommandKind::Add { paths } = &add_cmd.kind {
+                let mut args_vec = vec!["add"];
+                args_vec.extend(paths.iter().map(|s| s.as_str()));
+                run_git_command(repo_root, &args_vec, &label)?;
+            }
         }
 
         // If no explicit adds but we have files listed, add them
@@ -196,14 +199,8 @@ async fn run_commit_plan(
             run_git_command(repo_root, &add_args, &label)?;
         }
 
-        // Run commit
-        let commit_args: Vec<&str> = group
-            .commit_command
-            .raw
-            .split_whitespace()
-            .skip(1)
-            .collect();
-        run_git_command(repo_root, &commit_args, &label)?;
+        // Run commit using the already-parsed message (never re-split the quoted string)
+        run_git_command(repo_root, &["commit", "-m", &group.message], &label)?;
 
         println!(
             "  {} {} {}",
