@@ -10,6 +10,7 @@ pub struct GitCommand {
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommandKind {
     Add { paths: Vec<String> },
+    AddHunks { hunk_ids: Vec<String> },
     Reset { paths: Vec<String> },
     Commit { message: String },
     Comment,
@@ -20,6 +21,7 @@ pub enum CommandKind {
 #[derive(Debug, Clone)]
 pub struct CommitGroup {
     pub files: Vec<String>,
+    pub hunk_ids: Vec<String>,
     pub message: String,
     pub add_commands: Vec<GitCommand>,
     pub commit_command: GitCommand,
@@ -105,6 +107,30 @@ fn parse_single_command(line: &str) -> GitCommand {
         };
     }
 
+    // git add-hunks <hunk_id> [<hunk_id>...]
+    if let Some(rest) = line.strip_prefix("git add-hunks ") {
+        let hunk_ids: Vec<String> = rest.split_whitespace().map(|s| s.to_string()).collect();
+        return GitCommand {
+            raw: line.to_string(),
+            kind: CommandKind::AddHunks { hunk_ids },
+        };
+    }
+
+    // Comment format for hunk selection: # hunks: src/file.rs:10..20, src/file.rs:30..40
+    if let Some(rest) = line.strip_prefix("# hunks:") {
+        let hunk_ids: Vec<String> = rest
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !hunk_ids.is_empty() {
+            return GitCommand {
+                raw: line.to_string(),
+                kind: CommandKind::AddHunks { hunk_ids },
+            };
+        }
+    }
+
     // git reset (unstage) - e.g., git reset HEAD file.rb or git reset file.rb
     if let Some(rest) = line.strip_prefix("git reset ") {
         let args: Vec<&str> = rest.split_whitespace().collect();
@@ -147,16 +173,19 @@ fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
     let mut steps = Vec::new();
     let mut pending_adds: Vec<GitCommand> = Vec::new();
     let mut pending_files: Vec<String> = Vec::new();
+    let mut pending_hunk_ids: Vec<String> = Vec::new();
 
     for cmd in commands {
         match &cmd.kind {
             CommandKind::Reset { .. } => {
                 // Flush any pending adds before the reset
                 if !pending_adds.is_empty() {
-                    let group = build_commit_group(&pending_adds, "", &pending_files);
+                    let group =
+                        build_commit_group(&pending_adds, "", &pending_files, &pending_hunk_ids);
                     steps.push(ExecutionStep::CommitGroup(group));
                     pending_adds.clear();
                     pending_files.clear();
+                    pending_hunk_ids.clear();
                 }
                 steps.push(ExecutionStep::Reset(cmd.clone()));
             }
@@ -164,14 +193,23 @@ fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
                 pending_adds.push(cmd.clone());
                 pending_files.extend(paths.clone());
             }
+            CommandKind::AddHunks { hunk_ids } => {
+                pending_adds.push(cmd.clone());
+                pending_hunk_ids.extend(hunk_ids.clone());
+            }
             CommandKind::Commit { message } => {
-                if pending_adds.is_empty() && pending_files.is_empty() {
+                if pending_adds.is_empty()
+                    && pending_files.is_empty()
+                    && pending_hunk_ids.is_empty()
+                {
                     // Commit without explicit adds — implies "all staged"
                 }
-                let group = build_commit_group(&pending_adds, message, &pending_files);
+                let group =
+                    build_commit_group(&pending_adds, message, &pending_files, &pending_hunk_ids);
                 steps.push(ExecutionStep::CommitGroup(group));
                 pending_adds.clear();
                 pending_files.clear();
+                pending_hunk_ids.clear();
             }
             CommandKind::Comment | CommandKind::Other => {}
         }
@@ -179,16 +217,22 @@ fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
 
     // Flush any remaining pending adds
     if !pending_adds.is_empty() {
-        let group = build_commit_group(&pending_adds, "", &pending_files);
+        let group = build_commit_group(&pending_adds, "", &pending_files, &pending_hunk_ids);
         steps.push(ExecutionStep::CommitGroup(group));
     }
 
     Ok(steps)
 }
 
-fn build_commit_group(add_commands: &[GitCommand], message: &str, files: &[String]) -> CommitGroup {
+fn build_commit_group(
+    add_commands: &[GitCommand],
+    message: &str,
+    files: &[String],
+    hunk_ids: &[String],
+) -> CommitGroup {
     CommitGroup {
         files: files.to_vec(),
+        hunk_ids: hunk_ids.to_vec(),
         message: message.to_string(),
         add_commands: add_commands.to_vec(),
         commit_command: GitCommand {

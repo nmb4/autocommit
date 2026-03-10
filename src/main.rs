@@ -9,7 +9,7 @@ use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use parser::{ExecutionStep, ParseResult};
 use std::io::{self, Write};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -169,7 +169,7 @@ async fn run() -> Result<()> {
         &args,
         &client,
         &prompt,
-        &ctx.repo_root,
+        &ctx,
         reasoning_effort,
         raw_output,
         conventions.as_ref(),
@@ -181,7 +181,7 @@ async fn review_and_execute_plan(
     args: &Args,
     client: &api::ApiClient,
     prompt: &str,
-    repo_root: &str,
+    ctx: &git::GitContext,
     reasoning_effort: api::ReasoningEffort,
     mut raw_output: String,
     conventions: Option<&conventions::CommitConventions>,
@@ -201,7 +201,7 @@ async fn review_and_execute_plan(
                 return Ok(());
             }
             ParseResult::Steps(steps) => {
-                if execute_or_retry(args, &steps, repo_root)? {
+                if execute_or_retry(args, &steps, ctx)? {
                     return Ok(());
                 }
             }
@@ -249,7 +249,8 @@ async fn generate_plan(
     result
 }
 
-fn execute_or_retry(args: &Args, steps: &[ExecutionStep], repo_root: &str) -> Result<bool> {
+fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext) -> Result<bool> {
+    let repo_root = &ctx.repo_root;
     let commit_count = steps
         .iter()
         .filter(|s| matches!(s, ExecutionStep::CommitGroup(_)))
@@ -278,6 +279,11 @@ fn execute_or_retry(args: &Args, steps: &[ExecutionStep], repo_root: &str) -> Re
             ExecutionStep::CommitGroup(group) => {
                 println!("  {} {} Commit:", num, "📦".green().bold());
                 println!("      {}", group.message.green().bold());
+                if !group.hunk_ids.is_empty() {
+                    for hunk_id in &group.hunk_ids {
+                        println!("      {} {}", "~".cyan(), hunk_id.dimmed());
+                    }
+                }
                 for file in &group.files {
                     println!("      {} {}", "+".cyan(), file.dimmed());
                 }
@@ -315,19 +321,25 @@ fn execute_or_retry(args: &Args, steps: &[ExecutionStep], repo_root: &str) -> Re
                 println!("  {} {} Unstage", "↺".yellow().bold(), label.dimmed());
             }
             ExecutionStep::CommitGroup(group) => {
-                for add_cmd in &group.add_commands {
-                    if let parser::CommandKind::Add { paths } = &add_cmd.kind {
-                        let mut args_vec = vec!["add"];
-                        args_vec.extend(paths.iter().map(|s| s.as_str()));
-                        run_git_command(repo_root, &args_vec, &label)?;
+                // Handle hunk-based staging
+                if !group.hunk_ids.is_empty() {
+                    stage_hunks(repo_root, &group.hunk_ids, ctx)?;
+                } else {
+                    // Handle file-based staging (existing logic)
+                    for add_cmd in &group.add_commands {
+                        if let parser::CommandKind::Add { paths } = &add_cmd.kind {
+                            let mut args_vec = vec!["add"];
+                            args_vec.extend(paths.iter().map(|s| s.as_str()));
+                            run_git_command(repo_root, &args_vec, &label)?;
+                        }
                     }
-                }
 
-                if group.add_commands.is_empty() && !group.files.is_empty() {
-                    let mut add_args = vec!["add"];
-                    let file_refs: Vec<&str> = group.files.iter().map(|s| s.as_str()).collect();
-                    add_args.extend(file_refs);
-                    run_git_command(repo_root, &add_args, &label)?;
+                    if group.add_commands.is_empty() && !group.files.is_empty() {
+                        let mut add_args = vec!["add"];
+                        let file_refs: Vec<&str> = group.files.iter().map(|s| s.as_str()).collect();
+                        add_args.extend(file_refs);
+                        run_git_command(repo_root, &add_args, &label)?;
+                    }
                 }
 
                 run_git_command(repo_root, &["commit", "-m", &group.message], &label)?;
@@ -367,6 +379,40 @@ fn run_git_command(repo_root: &str, args: &[&str], label: &str) -> Result<()> {
             args.join(" "),
             status.code()
         );
+    }
+
+    Ok(())
+}
+
+fn stage_hunks(repo_root: &str, hunk_ids: &[String], ctx: &git::GitContext) -> Result<()> {
+    // Reset index to HEAD first
+    run_git_command(repo_root, &["reset", "HEAD"], "[stage]")?;
+
+    // Build partial patch from selected hunks
+    let partial_patch = ctx.build_partial_patch(hunk_ids);
+
+    if partial_patch.is_empty() {
+        anyhow::bail!("No hunks found for the specified IDs");
+    }
+
+    // Apply patch to index only (--cached)
+    // We need to use stdin to pass the patch
+    let mut child = Command::new("git")
+        .args(["-C", repo_root, "apply", "--cached", "-"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .context("Failed to spawn git apply --cached")?;
+
+    use std::io::Write;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(partial_patch.as_bytes())?;
+    }
+
+    let status = child.wait()
+        .context("Failed to wait for git apply --cached")?;
+
+    if !status.success() {
+        anyhow::bail!("git apply --cached failed with exit code {:?}", status.code());
     }
 
     Ok(())

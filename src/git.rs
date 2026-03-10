@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
 use crate::conventions::CommitConventions;
+use regex::Regex;
+use std::collections::HashMap;
 use std::process::Command;
 
 /// All git context we gather to pass to the model
@@ -25,6 +27,15 @@ pub struct CommitInfo {
 pub struct StagedFile {
     pub status: char,
     pub path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiffHunk {
+    pub id: String,
+    pub file: String,
+    #[allow(dead_code)]
+    hunk_header: String,
+    pub content: String,
 }
 
 impl GitContext {
@@ -79,6 +90,36 @@ impl GitContext {
         staged_lines + unstaged_lines
     }
 
+    /// Parse the unstaged diff into individual hunks with unique IDs.
+    pub fn parse_hunks(&self) -> Vec<DiffHunk> {
+        parse_diff_hunks(&self.unstaged_diff)
+    }
+
+    /// Build a partial patch from specific hunk IDs.
+    /// Each hunk_id format: "filename:start-end" (e.g., "src/main.rs:10-15")
+    pub fn build_partial_patch(&self, hunk_ids: &[String]) -> String {
+        let hunks = self.parse_hunks();
+        let hunk_map: HashMap<&str, &DiffHunk> = hunks.iter().map(|h| (h.id.as_str(), h)).collect();
+
+        let mut patch = String::new();
+        let mut current_file: Option<&str> = None;
+
+        for hunk_id in hunk_ids {
+            if let Some(hunk) = hunk_map.get(hunk_id.as_str()) {
+                if current_file != Some(hunk.file.as_str()) {
+                    if !patch.is_empty() {
+                        patch.push_str("\n");
+                    }
+                    current_file = Some(&hunk.file);
+                }
+                patch.push_str(&hunk.content);
+                patch.push('\n');
+            }
+        }
+
+        patch
+    }
+
     /// Format the context into a prompt-friendly string.
     #[allow(dead_code)]
     pub fn to_prompt(&self) -> String {
@@ -110,9 +151,32 @@ impl GitContext {
             out.push('\n');
         }
 
-        if !self.staged_diff.is_empty() {
-            out.push_str("Staged diff:\n```diff\n");
-            let pages = chunk_diff_by_file(&self.staged_diff, 32000);
+        // Parse hunks from unstaged diff for hunk-level selection
+        let hunks = self.parse_hunks();
+        let hunk_threshold = 5;
+
+        if hunks.len() >= hunk_threshold {
+            out.push_str(&format!(
+                "Available hunks ({} total - use hunk IDs for precise commits):\n",
+                hunks.len()
+            ));
+            out.push_str(
+                "When splitting changes across commits, use hunk IDs to select specific changes.\n",
+            );
+            out.push_str("Format: `# hunks: path:start..end` (comma or space-separated)\n");
+            out.push_str("Example: `# hunks: src/main.rs:10..20, src/main.rs:30..40`\n\n");
+            for hunk in &hunks {
+                out.push_str(&format!("  [{}]\n", hunk.id));
+                for line in hunk.content.lines().take(6) {
+                    out.push_str(&format!("    {}\n", line));
+                }
+                if hunk.content.lines().count() > 6 {
+                    out.push_str("    ...\n");
+                }
+            }
+            out.push('\n');
+            out.push_str("Unstaged diff:\n```diff\n");
+            let pages = chunk_diff_by_file(&self.unstaged_diff, 32000);
             for (i, page) in pages.iter().enumerate() {
                 if pages.len() > 1 {
                     out.push_str(&format!("=== DIFF PAGE {}/{} ===\n\n", i + 1, pages.len()));
@@ -121,10 +185,8 @@ impl GitContext {
                 out.push_str("\n");
             }
             out.push_str("```\n\n");
-        }
-
-        if !self.unstaged_diff.is_empty() {
-            out.push_str("Unstaged diff (for context):\n```diff\n");
+        } else if !self.unstaged_diff.is_empty() {
+            out.push_str("Unstaged diff:\n```diff\n");
             let pages = chunk_diff_by_file(&self.unstaged_diff, 32000);
             for (i, page) in pages.iter().enumerate() {
                 if pages.len() > 1 {
@@ -296,6 +358,73 @@ fn run_git(root: &str, args: &[&str]) -> Result<String> {
         .context("Failed to run git")?;
 
     Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn parse_diff_hunks(diff: &str) -> Vec<DiffHunk> {
+    let mut hunks = Vec::new();
+    let mut current_file = String::new();
+    let mut current_hunk_start = 0usize;
+    let mut current_hunk_end = 0usize;
+    let mut hunk_content = String::new();
+    let mut hunk_count_per_file: HashMap<String, usize> = HashMap::new();
+
+    let hunk_re = Regex::new(r"@@ -(\d+),?\d* \+(\d+),?(\d*) @@(.*)").unwrap();
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git") {
+            if let Some(paths) = line.strip_prefix("diff --git a/") {
+                if let Some(end) = paths.find(" b/") {
+                    current_file = paths[..end].to_string();
+                }
+            }
+        } else if line.starts_with("@@") {
+            if !hunk_content.is_empty() {
+                let id = format!(
+                    "{}:{}..{}",
+                    current_file, current_hunk_start, current_hunk_end
+                );
+                hunks.push(DiffHunk {
+                    id,
+                    file: current_file.clone(),
+                    hunk_header: hunk_content.lines().next().unwrap_or("").to_string(),
+                    content: hunk_content.trim().to_string(),
+                });
+            }
+
+            hunk_content = String::new();
+            *hunk_count_per_file.entry(current_file.clone()).or_insert(0) += 1;
+
+            if let Some(caps) = hunk_re.captures(line) {
+                current_hunk_start = caps
+                    .get(1)
+                    .map(|m| m.as_str().parse().unwrap_or(1))
+                    .unwrap_or(1);
+                let end_match = caps
+                    .get(3)
+                    .map(|m| m.as_str().parse::<usize>().ok())
+                    .flatten();
+                current_hunk_end = end_match.unwrap_or(current_hunk_start);
+            }
+        }
+
+        hunk_content.push_str(line);
+        hunk_content.push('\n');
+    }
+
+    if !hunk_content.is_empty() {
+        let id = format!(
+            "{}:{}..{}",
+            current_file, current_hunk_start, current_hunk_end
+        );
+        hunks.push(DiffHunk {
+            id,
+            file: current_file,
+            hunk_header: hunk_content.lines().next().unwrap_or("").to_string(),
+            content: hunk_content.trim().to_string(),
+        });
+    }
+
+    hunks
 }
 
 /// Truncate a diff to approximately `max_chars` characters, preserving structure.
