@@ -52,6 +52,13 @@ pub struct ApiClient {
     model: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct GenerationOptions {
+    pub reasoning_effort: ReasoningEffort,
+    pub retry_attempt: usize,
+    pub previous_output: Option<String>,
+}
+
 impl ApiClient {
     pub fn new(api_key: String, base_url: Option<String>, model: Option<String>) -> Self {
         ApiClient {
@@ -62,15 +69,32 @@ impl ApiClient {
         }
     }
 
-    pub async fn generate_commits(&self, git_context: &str, reasoning_effort: ReasoningEffort) -> Result<String> {
+    pub async fn generate_commits(
+        &self,
+        git_context: &str,
+        options: &GenerationOptions,
+    ) -> Result<String> {
         let system_prompt = SYSTEM_PROMPT.trim().to_string();
 
-        let user_message = format!(
+        let mut user_message = format!(
             "Here is the current git repository state:\n\n{}\n\nPlease analyze this and generate the appropriate git commands.",
             git_context
         );
 
-        let reason_effort_str = match reasoning_effort {
+        if options.retry_attempt > 0 {
+            user_message.push_str(&format!(
+                "\n\nThis is retry attempt {}. Produce a different commit plan than the previous attempt while still matching the repository state.",
+                options.retry_attempt
+            ));
+            if let Some(previous_output) = &options.previous_output {
+                user_message.push_str(&format!(
+                    "\n\nPrevious attempt output:\n```shell\n{}\n```",
+                    previous_output.trim()
+                ));
+            }
+        }
+
+        let reason_effort_str = match options.reasoning_effort {
             ReasoningEffort::Instant => None,
             ReasoningEffort::Low => Some("low".to_string()),
             ReasoningEffort::High => Some("high".to_string()),
@@ -110,10 +134,7 @@ impl ApiClient {
             anyhow::bail!("API error {}: {}", status, body);
         }
 
-        let chat: ChatResponse = resp
-            .json()
-            .await
-            .context("Failed to parse API response")?;
+        let chat: ChatResponse = resp.json().await.context("Failed to parse API response")?;
 
         chat.choices
             .into_iter()

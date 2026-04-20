@@ -5,9 +5,9 @@ mod parser;
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use dialoguer::Confirm;
 use indicatif::{ProgressBar, ProgressStyle};
 use parser::{ExecutionStep, ParseResult};
+use std::io::{self, Write};
 use std::process::Command;
 use std::time::Duration;
 
@@ -140,11 +140,13 @@ async fn run() -> Result<()> {
     }
 
     // ── 2. Call the model ────────────────────────────────────────────────────
-    let sp2 = spinner("Asking Mercury to analyze your changes...");
-    let client = api::ApiClient::new(args.api_key.clone(), args.base_url.clone(), args.model.clone());
+    let client = api::ApiClient::new(
+        args.api_key.clone(),
+        args.base_url.clone(),
+        args.model.clone(),
+    );
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
-    let raw_output = client.generate_commits(&prompt, reasoning_effort).await?;
-    sp2.finish_and_clear();
+    let raw_output = generate_plan(&client, &prompt, reasoning_effort, 0, None).await?;
 
     if args.dry_run {
         println!("{}", "── Raw model output ──".dimmed());
@@ -152,32 +154,90 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
-    // ── 3. Parse model output ────────────────────────────────────────────────
-    let parsed = parser::parse_commands(&raw_output)
-        .context("Failed to parse model output into git commands")?;
-
-    match parsed {
-        ParseResult::NothingToCommit => {
-            println!(
-                "{} The model determined there is nothing meaningful to commit.",
-                "○".yellow()
-            );
-            return Ok(());
-        }
-        ParseResult::Steps(steps) => {
-            run_execution_plan(&args, &steps, &ctx.repo_root).await?;
-        }
-    }
-
-    Ok(())
+    review_and_execute_plan(
+        &args,
+        &client,
+        &prompt,
+        &ctx.repo_root,
+        reasoning_effort,
+        raw_output,
+    )
+    .await
 }
 
-async fn run_execution_plan(
+async fn review_and_execute_plan(
     args: &Args,
-    steps: &[ExecutionStep],
+    client: &api::ApiClient,
+    prompt: &str,
     repo_root: &str,
+    reasoning_effort: api::ReasoningEffort,
+    mut raw_output: String,
 ) -> Result<()> {
-    let commit_count = steps.iter().filter(|s| matches!(s, ExecutionStep::CommitGroup(_))).count();
+    let mut retry_attempt = 0;
+
+    loop {
+        let parsed = parser::parse_commands(&raw_output)
+            .context("Failed to parse model output into git commands")?;
+
+        match parsed {
+            ParseResult::NothingToCommit => {
+                println!(
+                    "{} The model determined there is nothing meaningful to commit.",
+                    "○".yellow()
+                );
+                return Ok(());
+            }
+            ParseResult::Steps(steps) => {
+                if execute_or_retry(args, &steps, repo_root)? {
+                    return Ok(());
+                }
+            }
+        }
+
+        retry_attempt += 1;
+        raw_output = generate_plan(
+            client,
+            prompt,
+            reasoning_effort,
+            retry_attempt,
+            Some(raw_output.as_str()),
+        )
+        .await?;
+    }
+}
+
+async fn generate_plan(
+    client: &api::ApiClient,
+    prompt: &str,
+    reasoning_effort: api::ReasoningEffort,
+    retry_attempt: usize,
+    previous_output: Option<&str>,
+) -> Result<String> {
+    let message = if retry_attempt == 0 {
+        "Asking Mercury to analyze your changes..."
+    } else {
+        "Retrying commit plan generation..."
+    };
+    let spinner = spinner(message);
+    let result = client
+        .generate_commits(
+            prompt,
+            &api::GenerationOptions {
+                reasoning_effort,
+                retry_attempt,
+                previous_output: previous_output.map(str::to_owned),
+            },
+        )
+        .await;
+    spinner.finish_and_clear();
+    result
+}
+
+fn execute_or_retry(args: &Args, steps: &[ExecutionStep], repo_root: &str) -> Result<bool> {
+    let commit_count = steps
+        .iter()
+        .filter(|s| matches!(s, ExecutionStep::CommitGroup(_)))
+        .count();
 
     // ── Display plan ─────────────────────────────────────────────────────────
     println!();
@@ -193,7 +253,7 @@ async fn run_execution_plan(
 
     for (i, step) in steps.iter().enumerate() {
         let num = format!("[{}/{}]", i + 1, steps.len()).dimmed();
-        
+
         match step {
             ExecutionStep::Reset(cmd) => {
                 println!("  {} {} Unstage files:", num, "↺".yellow().bold());
@@ -216,21 +276,19 @@ async fn run_execution_plan(
 
     // ── Confirm ──────────────────────────────────────────────────────────────
     if !args.yes {
-        let confirmed = Confirm::new()
-            .with_prompt("Execute these steps?")
-            .default(true)
-            .interact()
-            .context("Prompt failed")?;
-
-        if !confirmed {
-            println!("{} Aborted.", "✗".red());
-            return Ok(());
+        match prompt_for_plan_action()? {
+            PlanAction::Execute => {}
+            PlanAction::Retry => return Ok(false),
+            PlanAction::Abort => {
+                println!("{} Aborted.", "✗".red());
+                return Ok(true);
+            }
         }
     }
 
     // ── Execute ─────────────────────────────────────────────────────────────
     println!();
-    
+
     for (i, step) in steps.iter().enumerate() {
         let label = format!("[{}/{}]", i + 1, steps.len());
 
@@ -276,7 +334,7 @@ async fn run_execution_plan(
         if commit_count == 1 { "" } else { "s" }
     );
 
-    Ok(())
+    Ok(true)
 }
 
 fn run_git_command(repo_root: &str, args: &[&str], label: &str) -> Result<()> {
@@ -308,4 +366,37 @@ fn spinner(msg: &str) -> ProgressBar {
     pb.set_message(msg.to_string());
     pb.enable_steady_tick(Duration::from_millis(80));
     pb
+}
+
+enum PlanAction {
+    Execute,
+    Retry,
+    Abort,
+}
+
+fn prompt_for_plan_action() -> Result<PlanAction> {
+    print!(
+        "{}",
+        "Press Enter to execute, r to retry, or n to abort: ".cyan()
+    );
+    io::stdout().flush().context("Failed to flush prompt")?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).context("Prompt failed")?;
+
+    let normalized = input.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "" => Ok(PlanAction::Execute),
+        "r" => Ok(PlanAction::Retry),
+        "n" => Ok(PlanAction::Abort),
+        _ => {
+            println!(
+                "{} Enter executes, {} retries, {} aborts.",
+                "•".dimmed(),
+                "r".bold(),
+                "n".bold()
+            );
+            prompt_for_plan_action()
+        }
+    }
 }
