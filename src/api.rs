@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::conventions::CommitConventions;
 use serde::{Deserialize, Serialize};
 
 const BASE_URL: &str = "https://api.inceptionlabs.ai/v1";
@@ -73,8 +74,9 @@ impl ApiClient {
         &self,
         git_context: &str,
         options: &GenerationOptions,
+        conventions: Option<&CommitConventions>,
     ) -> Result<String> {
-        let system_prompt = SYSTEM_PROMPT.trim().to_string();
+        let system_prompt = Self::build_system_prompt(conventions);
 
         let mut user_message = format!(
             "Here is the current git repository state:\n\n{}\n\nPlease analyze this and generate the appropriate git commands.",
@@ -144,7 +146,7 @@ impl ApiClient {
     }
 }
 
-const SYSTEM_PROMPT: &str = r#"
+const BASE_SYSTEM_PROMPT: &str = r#"
 You are an expert at writing meaningful, well-structured git commit messages.
 
 Given information about the current state of a git repository (branch, recent commits, staged/unstaged changes, diffs), your job is to produce a series of git commands that will stage, unstage, and commit the changes meaningfully.
@@ -185,3 +187,20 @@ If there is nothing to commit (no staged or unstaged changes, no untracked files
 # nothing to commit
 ```
 "#;
+
+impl ApiClient {
+    fn build_system_prompt(conventions: Option<&CommitConventions>) -> String {
+        let mut prompt = BASE_SYSTEM_PROMPT.trim().to_string();
+
+        if let Some(conv) = conventions {
+            let conventions_text = conv.to_prompt_fragment();
+            if !conventions_text.trim().is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str("PROJECT-SPECIFIC CONVENTIONS:\n\n");
+                prompt.push_str(&conventions_text);
+            }
+        }
+
+        prompt
+    }
+}

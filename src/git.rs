@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use crate::conventions::CommitConventions;
 use std::process::Command;
 
 /// All git context we gather to pass to the model
@@ -79,6 +80,7 @@ impl GitContext {
     }
 
     /// Format the context into a prompt-friendly string.
+    #[allow(dead_code)]
     pub fn to_prompt(&self) -> String {
         let mut out = String::new();
 
@@ -142,6 +144,65 @@ impl GitContext {
             || !self.untracked_files.is_empty()
             || !self.staged_diff.is_empty()
             || !self.unstaged_diff.is_empty()
+    }
+
+    /// Format the context into a prompt-friendly string with conventions.
+    pub fn to_prompt_with_conventions(&self, _conventions: Option<&CommitConventions>) -> String {
+        let mut out = String::new();
+
+        out.push_str(&format!("Branch: {}\n\n", self.current_branch));
+
+        if !self.recent_commits.is_empty() {
+            out.push_str("Recent commits (for style reference):\n");
+            for c in &self.recent_commits {
+                out.push_str(&format!("  {} {} {}\n", c.hash, c.author, c.message));
+            }
+            out.push('\n');
+        }
+
+        if !self.staged_files.is_empty() {
+            out.push_str("Staged files:\n");
+            for f in &self.staged_files {
+                out.push_str(&format!("  {} {}\n", f.status, f.path));
+            }
+            out.push('\n');
+        }
+
+        if !self.untracked_files.is_empty() {
+            out.push_str("Untracked files:\n");
+            for f in &self.untracked_files {
+                out.push_str(&format!("  {}\n", f));
+            }
+            out.push('\n');
+        }
+
+        if !self.staged_diff.is_empty() {
+            out.push_str("Staged diff:\n```diff\n");
+            let pages = chunk_diff_by_file(&self.staged_diff, 32000);
+            for (i, page) in pages.iter().enumerate() {
+                if pages.len() > 1 {
+                    out.push_str(&format!("=== DIFF PAGE {}/{} ===\n\n", i + 1, pages.len()));
+                }
+                out.push_str(page);
+                out.push_str("\n");
+            }
+            out.push_str("```\n\n");
+        }
+
+        if !self.unstaged_diff.is_empty() {
+            out.push_str("Unstaged diff (for context):\n```diff\n");
+            let pages = chunk_diff_by_file(&self.unstaged_diff, 32000);
+            for (i, page) in pages.iter().enumerate() {
+                if pages.len() > 1 {
+                    out.push_str(&format!("=== DIFF PAGE {}/{} ===\n\n", i + 1, pages.len()));
+                }
+                out.push_str(page);
+                out.push_str("\n");
+            }
+            out.push_str("```\n\n");
+        }
+
+        out
     }
 }
 

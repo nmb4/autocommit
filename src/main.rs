@@ -1,4 +1,5 @@
 mod api;
+mod conventions;
 mod git;
 mod parser;
 
@@ -131,7 +132,17 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let prompt = ctx.to_prompt();
+    // ── 1.5. Discover commit conventions ─────────────────────────────────────
+    let conventions = conventions::CommitConventions::discover_any(&ctx.repo_root)?;
+
+    if conventions.is_some() {
+        println!(
+            "{} Loaded commit conventions",
+            "●".cyan()
+        );
+    }
+
+    let prompt = ctx.to_prompt_with_conventions(conventions.as_ref());
 
     if args.show_context {
         println!("{}", "── Git context sent to model ──".dimmed());
@@ -146,7 +157,7 @@ async fn run() -> Result<()> {
         args.model.clone(),
     );
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
-    let raw_output = generate_plan(&client, &prompt, reasoning_effort, 0, None).await?;
+    let raw_output = generate_plan(&client, &prompt, reasoning_effort, 0, None, conventions.as_ref()).await?;
 
     if args.dry_run {
         println!("{}", "── Raw model output ──".dimmed());
@@ -161,6 +172,7 @@ async fn run() -> Result<()> {
         &ctx.repo_root,
         reasoning_effort,
         raw_output,
+        conventions.as_ref(),
     )
     .await
 }
@@ -172,6 +184,7 @@ async fn review_and_execute_plan(
     repo_root: &str,
     reasoning_effort: api::ReasoningEffort,
     mut raw_output: String,
+    conventions: Option<&conventions::CommitConventions>,
 ) -> Result<()> {
     let mut retry_attempt = 0;
 
@@ -201,6 +214,7 @@ async fn review_and_execute_plan(
             reasoning_effort,
             retry_attempt,
             Some(raw_output.as_str()),
+            conventions,
         )
         .await?;
     }
@@ -212,6 +226,7 @@ async fn generate_plan(
     reasoning_effort: api::ReasoningEffort,
     retry_attempt: usize,
     previous_output: Option<&str>,
+    conventions: Option<&conventions::CommitConventions>,
 ) -> Result<String> {
     let message = if retry_attempt == 0 {
         "Asking Mercury to analyze your changes..."
@@ -227,6 +242,7 @@ async fn generate_plan(
                 retry_attempt,
                 previous_output: previous_output.map(str::to_owned),
             },
+            conventions,
         )
         .await;
     spinner.finish_and_clear();
