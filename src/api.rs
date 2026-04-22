@@ -159,8 +159,12 @@ RULES:
 5. If changes are clearly distinct concerns, split them into multiple commits.
 6. Use `git reset` to unstage files when you need to reorganize commits. For example, if files A and B are staged but should go in separate commits, first use `git reset` to unstage, then `git add` for each commit individually.
 7. Each commit block must include `git add` commands for specific files followed by a `git commit` command.
-8. Never use `git add .` or `git add -A` unless all changes genuinely belong to one commit.
-9. Prefer specific file paths when grouping makes sense.
+8. NEVER produce a commit without a message - every commit MUST have a meaningful `-m "message"` argument.
+9. NEVER leave files staged without a corresponding commit command.
+10. Never use `git add .` or `git add -A` unless all changes genuinely belong to one commit.
+11. Prefer specific file paths when grouping makes sense.
+
+IMPORTANT: Never leave any files staged without committing them.
 
 OUTPUT FORMAT:
 Output ONLY a fenced code block tagged with `shell`, containing valid shell commands. No explanation before or after. No markdown outside the code block. No comments inside the commands. Just the raw commands.
