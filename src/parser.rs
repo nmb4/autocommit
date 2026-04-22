@@ -204,6 +204,8 @@ fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
                 {
                     // Commit without explicit adds — implies "all staged"
                 }
+
+                // Let empty messages through so caller can detect and retry
                 let group =
                     build_commit_group(&pending_adds, message, &pending_files, &pending_hunk_ids);
                 steps.push(ExecutionStep::CommitGroup(group));
@@ -215,10 +217,9 @@ fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
         }
     }
 
-    // Flush any remaining pending adds
+    // Flush any remaining pending adds - let caller detect invalid state
     if !pending_adds.is_empty() {
-        let group = build_commit_group(&pending_adds, "", &pending_files, &pending_hunk_ids);
-        steps.push(ExecutionStep::CommitGroup(group));
+        // Don't emit warning - let the caller handle retries
     }
 
     Ok(steps)
