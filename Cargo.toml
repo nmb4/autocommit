@@ -24,6 +24,7 @@ serde_json = "1"
 # Terminal UX
 indicatif = "0.17"
 colored = "2"
+crossterm = "0.28"
 
 # Error handling
 anyhow = "1"

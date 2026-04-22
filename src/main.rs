@@ -6,6 +6,8 @@ mod parser;
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::terminal::enable_raw_mode;
 use indicatif::{ProgressBar, ProgressStyle};
 use parser::{ExecutionStep, ParseResult};
 use std::io::{self, Write};
@@ -436,6 +438,21 @@ enum PlanAction {
     Abort,
 }
 
+struct RawModeGuard;
+
+impl RawModeGuard {
+    fn new() -> Result<Self> {
+        enable_raw_mode().context("Failed to enable raw input mode")?;
+        Ok(Self)
+    }
+}
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = crossterm::terminal::disable_raw_mode();
+    }
+}
+
 fn prompt_for_plan_action() -> Result<PlanAction> {
     print!(
         "{}",
@@ -443,22 +460,25 @@ fn prompt_for_plan_action() -> Result<PlanAction> {
     );
     io::stdout().flush().context("Failed to flush prompt")?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).context("Prompt failed")?;
+    let raw_mode = RawModeGuard::new()?;
+    loop {
+        let event = event::read().context("Prompt failed")?;
+        if let Event::Key(key) = event {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
 
-    let normalized = input.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "" => Ok(PlanAction::Execute),
-        "r" => Ok(PlanAction::Retry),
-        "n" => Ok(PlanAction::Abort),
-        _ => {
-            println!(
-                "{} Enter executes, {} retries, {} aborts.",
-                "•".dimmed(),
-                "r".bold(),
-                "n".bold()
-            );
-            prompt_for_plan_action()
+            let (action, echo) = match key.code {
+                KeyCode::Enter => (PlanAction::Execute, "<enter>"),
+                KeyCode::Char('r') | KeyCode::Char('R') => (PlanAction::Retry, "r"),
+                KeyCode::Char('n') | KeyCode::Char('N') => (PlanAction::Abort, "n"),
+                _ => continue,
+            };
+
+            drop(raw_mode);
+            println!("{}", echo.dimmed());
+            io::stdout().flush().context("Failed to flush prompt")?;
+            return Ok(action);
         }
     }
 }
