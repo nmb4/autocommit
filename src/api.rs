@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use crate::conventions::CommitConventions;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use serde_json::Value;
 
 const INCEPTION_BASE_URL: &str = "https://api.inceptionlabs.ai/v1";
 const INCEPTION_MODEL: &str = "mercury-2";
@@ -61,20 +62,10 @@ struct ReasoningConfig {
     effort: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 struct Message {
     role: String,
     content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<Choice>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Choice {
-    message: Message,
 }
 
 pub struct ApiClient {
@@ -195,13 +186,51 @@ impl ApiClient {
             anyhow::bail!("API error {}: {}", status, body);
         }
 
-        let chat: ChatResponse = resp.json().await.context("Failed to parse API response")?;
+        let json: Value = resp.json().await.context("Failed to parse API response")?;
+        extract_text_from_chat_response(&json).context("Empty textual response from API")
+    }
+}
 
-        chat.choices
-            .into_iter()
-            .next()
-            .map(|c| c.message.content)
-            .context("Empty response from API")
+fn extract_text_from_chat_response(json: &Value) -> Option<String> {
+    let choice0 = json.get("choices")?.as_array()?.first()?;
+
+    if let Some(content) = choice0
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(extract_text_from_content_value)
+    {
+        if !content.trim().is_empty() {
+            return Some(content);
+        }
+    }
+
+    if let Some(text) = choice0.get("text").and_then(Value::as_str) {
+        if !text.trim().is_empty() {
+            return Some(text.to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_text_from_content_value(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Array(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                if let Some(t) = part.get("text").and_then(Value::as_str) {
+                    out.push_str(t);
+                } else if let Some(t) = part
+                    .get("content")
+                    .and_then(Value::as_str)
+                {
+                    out.push_str(t);
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        }
+        _ => None,
     }
 }
 
