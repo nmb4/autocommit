@@ -526,11 +526,10 @@ fn run_action_prompt(prompt: &mut ActionPrompt) -> Result<ActionResult> {
     let prompt_height = prompt.desired_height(terminal_size.0);
     let available_space = terminal_size.1.saturating_sub(cursor_pos.1);
     let start_row = if available_space < prompt_height {
-        // Scroll enough to guarantee a full blank prompt block at the bottom.
-        let room_to_bottom = terminal_size
-            .1
-            .saturating_sub(cursor_pos.1.saturating_add(1));
-        let newlines = prompt_height.saturating_add(room_to_bottom);
+        // Scroll just enough so the prompt fits without creating extra vertical gap.
+        // Printing (prompt_height - 1) newlines from any row yields exactly the
+        // required scroll amount when space is insufficient.
+        let newlines = prompt_height.saturating_sub(1);
         for _ in 0..newlines {
             print!("\r\n");
         }
