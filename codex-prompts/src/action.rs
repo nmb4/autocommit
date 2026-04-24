@@ -10,7 +10,7 @@ use ratatui::text::Span;
 use ratatui::widgets::Widget;
 
 use crate::scroll_state::ScrollState;
-use crate::selection_rendering::{menu_surface_padding_height, render_menu_surface};
+use crate::selection_rendering::menu_surface_inset;
 
 #[derive(Debug, Clone)]
 pub enum ActionResult {
@@ -183,7 +183,7 @@ impl ActionPrompt {
         let rows = NUM_CHOICES as u16;
         let spacer = 1u16;
         let footer = 1u16;
-        let padding = menu_surface_padding_height();
+        let padding = 0u16;
         header + rows + spacer + footer + padding
     }
 
@@ -191,7 +191,11 @@ impl ActionPrompt {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let content_area = render_menu_surface(area, buf);
+        // Keep horizontal inset from menu surfaces, but avoid vertical inset to
+        // prevent extra blank lines between plan output and prompt content.
+        let mut content_area = menu_surface_inset(area);
+        content_area.y = area.y;
+        content_area.height = area.height;
         if content_area.width == 0 || content_area.height == 0 {
             return;
         }

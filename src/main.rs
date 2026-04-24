@@ -335,14 +335,15 @@ fn execute_or_retry(
                 for file in &group.files {
                     println!("      {} {}", "+".cyan(), file.dimmed());
                 }
-                println!("      {}", group.commit_command.raw.dimmed());
+                if !group.commit_command.raw.trim().is_empty() {
+                    println!("      {}", group.commit_command.raw.dimmed());
+                }
             }
         }
         if i + 1 < steps.len() {
             println!();
         }
     }
-    println!();
 
     // ── Confirm ──────────────────────────────────────────────────────────────
     if !args.yes {
