@@ -124,6 +124,10 @@ struct Args {
     #[arg(long, env = "AUTOCOMMIT_MODEL")]
     model: Option<String>,
 
+    /// Override OpenRouter model ID (or set AC_OR_MODEL env var)
+    #[arg(long = "or-model", env = "AC_OR_MODEL")]
+    openrouter_model: Option<String>,
+
     /// Reasoning effort: auto (default), instant, low, or high. Auto selects based on diff volume.
     #[arg(short = 'r', long, value_enum, default_value = "auto")]
     reasoning: ReasoningEffortArg,
@@ -200,12 +204,19 @@ async fn run() -> Result<()> {
         args.inception_api_key.is_some(),
         args.openrouter_api_key.is_some(),
     )?;
+    let model_override = match provider {
+        api::Provider::OpenRouter => args
+            .openrouter_model
+            .clone()
+            .or_else(|| args.model.clone()),
+        api::Provider::Inception => args.model.clone(),
+    };
     let client = api::ApiClient::new(
         provider,
         args.inception_api_key.clone(),
         args.openrouter_api_key.clone(),
         args.base_url.clone(),
-        args.model.clone(),
+        model_override,
     )?;
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
     let raw_output = generate_plan(

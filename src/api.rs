@@ -6,7 +6,7 @@ use serde_json::Value;
 const INCEPTION_BASE_URL: &str = "https://api.inceptionlabs.ai/v1";
 const INCEPTION_MODEL: &str = "mercury-2";
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-const OPENROUTER_MODEL: &str = "tencent/hy3-preview:free";
+const OPENROUTER_MODEL: &str = "inclusionai/ling-2.6-1t:free";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
