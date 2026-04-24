@@ -10,12 +10,13 @@ use ratatui::text::Span;
 use ratatui::widgets::Widget;
 
 use crate::scroll_state::ScrollState;
-use crate::selection_rendering::{render_menu_surface, menu_surface_padding_height};
+use crate::selection_rendering::{menu_surface_padding_height, render_menu_surface};
 
 #[derive(Debug, Clone)]
 pub enum ActionResult {
     Accept,
     Retry { note: String },
+    ToggleLongCommits,
     Abort,
 }
 
@@ -28,6 +29,7 @@ enum Focus {
 pub struct ActionPrompt {
     message: String,
     detail_lines: Vec<String>,
+    long_commits_enabled: bool,
     state: ScrollState,
     focus: Focus,
     note_draft: String,
@@ -37,28 +39,18 @@ pub struct ActionPrompt {
 
 const ACCEPT: usize = 0;
 const RETRY: usize = 1;
-const NUM_CHOICES: usize = 3;
+const TOGGLE_LONG: usize = 2;
+const NUM_CHOICES: usize = 4;
 const PLACEHOLDER: &str = "note…";
 
-struct ChoiceDef {
-    label: &'static str,
-    shortcut: char,
-    has_note: bool,
-}
-
-const CHOICES: [ChoiceDef; 3] = [
-    ChoiceDef { label: "Accept", shortcut: 'a', has_note: false },
-    ChoiceDef { label: "Retry", shortcut: 'r', has_note: true },
-    ChoiceDef { label: "Abort", shortcut: 'n', has_note: false },
-];
-
 impl ActionPrompt {
-    pub fn new(message: String, detail_lines: Vec<String>) -> Self {
+    pub fn new(message: String, detail_lines: Vec<String>, long_commits_enabled: bool) -> Self {
         let mut state = ScrollState::new();
         state.selected_idx = Some(ACCEPT);
         Self {
             message,
             detail_lines,
+            long_commits_enabled,
             state,
             focus: Focus::Options,
             note_draft: String::new(),
@@ -102,6 +94,11 @@ impl ActionPrompt {
                             self.result = Some(ActionResult::Retry {
                                 note: self.note_draft.clone(),
                             });
+                            self.done = true;
+                            return;
+                        }
+                        'l' => {
+                            self.result = Some(ActionResult::ToggleLongCommits);
                             self.done = true;
                             return;
                         }
@@ -167,6 +164,7 @@ impl ActionPrompt {
         match self.state.selected_idx {
             Some(ACCEPT) => self.result = Some(ActionResult::Accept),
             Some(RETRY) => self.result = Some(ActionResult::Retry { note }),
+            Some(TOGGLE_LONG) => self.result = Some(ActionResult::ToggleLongCommits),
             _ => self.result = Some(ActionResult::Abort),
         }
         self.done = true;
@@ -183,9 +181,10 @@ impl ActionPrompt {
     pub fn desired_height(&self, _width: u16) -> u16 {
         let header = 1u16 + self.detail_lines.len() as u16 + 1;
         let rows = NUM_CHOICES as u16;
+        let spacer = 1u16;
         let footer = 1u16;
         let padding = menu_surface_padding_height();
-        header + rows + footer + padding
+        header + rows + spacer + footer + padding
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -202,15 +201,27 @@ impl ActionPrompt {
 
         // Header
         Line::from(self.message.clone().bold()).render(
-            Rect { x: content_area.x, y, width: content_area.width, height: 1 },
+            Rect {
+                x: content_area.x,
+                y,
+                width: content_area.width,
+                height: 1,
+            },
             buf,
         );
         y += 1;
 
         for line in &self.detail_lines {
-            if y >= max_y { return; }
+            if y >= max_y {
+                return;
+            }
             Line::from(line.clone()).render(
-                Rect { x: content_area.x, y, width: content_area.width, height: 1 },
+                Rect {
+                    x: content_area.x,
+                    y,
+                    width: content_area.width,
+                    height: 1,
+                },
                 buf,
             );
             y += 1;
@@ -218,11 +229,27 @@ impl ActionPrompt {
         y += 1; // spacer
 
         // Choices
-        for (idx, choice) in CHOICES.iter().enumerate() {
-            if y >= max_y { break; }
+        for idx in 0..NUM_CHOICES {
+            if y >= max_y {
+                break;
+            }
             let is_selected = self.state.selected_idx == Some(idx);
             let is_note_focused = self.focus == Focus::Note;
             let has_text = !self.note_draft.is_empty();
+            let (label, shortcut, has_note) = match idx {
+                ACCEPT => ("Accept", 'a', false),
+                RETRY => ("Retry", 'r', true),
+                TOGGLE_LONG => (
+                    if self.long_commits_enabled {
+                        "Use short commits"
+                    } else {
+                        "Use long commits"
+                    },
+                    'l',
+                    false,
+                ),
+                _ => ("Abort", 'n', false),
+            };
 
             let mut spans: Vec<Span> = Vec::new();
             let row_style = if is_selected {
@@ -233,9 +260,12 @@ impl ActionPrompt {
             let dim = Style::default().dim();
 
             let prefix = if is_selected { "› " } else { "  " };
-            spans.push(Span::styled(format!("{prefix}{}. {}", idx + 1, choice.label), row_style));
+            spans.push(Span::styled(
+                format!("{prefix}{}. {label}", idx + 1),
+                row_style,
+            ));
 
-            if is_selected && choice.has_note {
+            if is_selected && has_note {
                 if has_text {
                     spans.push(Span::styled(", ", dim));
                     let note_style = if is_note_focused {
@@ -248,28 +278,39 @@ impl ActionPrompt {
                         let cursor = if self.cursor_visible() { "█" } else { " " };
                         spans.push(Span::styled(cursor, Style::default().fg(Color::Blue)));
                     }
-                    spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
+                    spans.push(Span::styled(format!(" ({shortcut})"), dim));
                 } else if is_note_focused {
                     spans.push(Span::styled(" ", Style::default()));
-                    spans.push(Span::styled(PLACEHOLDER, Style::default().fg(Color::DarkGray).dim()));
+                    spans.push(Span::styled(
+                        PLACEHOLDER,
+                        Style::default().fg(Color::DarkGray).dim(),
+                    ));
                     let cursor = if self.cursor_visible() { "█" } else { " " };
                     spans.push(Span::styled(cursor, Style::default().fg(Color::Blue)));
-                    spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
+                    spans.push(Span::styled(format!(" ({shortcut})"), dim));
                 } else {
-                    spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
+                    spans.push(Span::styled(format!(" ({shortcut})"), dim));
                 }
             } else {
-                spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
+                spans.push(Span::styled(format!(" ({shortcut})"), dim));
             }
 
             Line::from(spans).render(
-                Rect { x: content_area.x, y, width: content_area.width, height: 1 },
+                Rect {
+                    x: content_area.x,
+                    y,
+                    width: content_area.width,
+                    height: 1,
+                },
                 buf,
             );
             y += 1;
         }
 
-        // Minimal footer hints
+        // Spacer before footer
+        y += 1;
+
+        // Footer hints
         if y < max_y {
             let sep = Span::styled(" · ", Style::default().dim());
             let dim = Style::default().dim();
@@ -277,20 +318,30 @@ impl ActionPrompt {
 
             let spans: Vec<Span> = match self.focus {
                 Focus::Options => vec![
-                    Span::styled("enter", w), Span::styled("confirm", dim),
+                    Span::styled("tab", w),
+                    Span::styled(" add note", dim),
                     sep.clone(),
-                    Span::styled("tab", w), Span::styled("note", dim),
+                    Span::styled("enter", w),
+                    Span::styled(" confirm", dim),
                     sep.clone(),
-                    Span::styled("esc", w), Span::styled("abort", dim),
+                    Span::styled("esc", w),
+                    Span::styled(" abort", dim),
                 ],
                 Focus::Note => vec![
-                    Span::styled("tab/esc", w), Span::styled("done", dim),
+                    Span::styled("tab/esc", w),
+                    Span::styled(" close note", dim),
                     sep.clone(),
-                    Span::styled("enter", w), Span::styled("confirm", dim),
+                    Span::styled("enter", w),
+                    Span::styled(" confirm", dim),
                 ],
             };
             Line::from(spans).render(
-                Rect { x: content_area.x + 2, y, width: content_area.width.saturating_sub(2), height: 1 },
+                Rect {
+                    x: content_area.x + 2,
+                    y,
+                    width: content_area.width.saturating_sub(2),
+                    height: 1,
+                },
                 buf,
             );
         }

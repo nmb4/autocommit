@@ -8,9 +8,9 @@ use ratatui::layout::Size;
 use ratatui::Terminal;
 use std::io::{self, Write};
 
+use codex_prompts::action::ActionResult;
 use codex_prompts::approve::ApproveResult;
 use codex_prompts::questions::QuestionsResult;
-use codex_prompts::action::ActionResult;
 use codex_prompts::select::SelectResult;
 use codex_prompts::*;
 
@@ -47,8 +47,7 @@ fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, u16)> {
     enable_raw_mode()?;
 
     // Get current cursor position before starting prompt
-    let cursor_pos = crossterm::cursor::position()
-        .unwrap_or((0, 0));
+    let cursor_pos = crossterm::cursor::position().unwrap_or((0, 0));
 
     let backend = CrosstermBackend::new(io::stdout());
     let terminal = Terminal::new(backend)?;
@@ -237,10 +236,7 @@ fn run_retry() -> Result<()> {
         "  2 files changed, 127 insertions(+)".to_string(),
     ];
 
-    let mut prompt = ActionPrompt::new(
-        "Action Required".to_string(),
-        detail_lines,
-    );
+    let mut prompt = ActionPrompt::new("Action Required".to_string(), detail_lines, false);
 
     let result = run_retry_loop(&mut terminal, &mut prompt, start_row);
     restore_terminal()?;
@@ -259,6 +255,7 @@ fn run_retry() -> Result<()> {
                 println!("Retry with note: {note:?}");
             }
         }
+        ActionResult::ToggleLongCommits => println!("Toggle long commits"),
         ActionResult::Abort => println!("Aborted"),
     }
 
@@ -364,7 +361,10 @@ fn run_questions_loop(
                 if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
                     prompt.handle_key(key);
                     if prompt.is_done() {
-                        return prompt.result().cloned().unwrap_or(QuestionsResult::Cancelled);
+                        return prompt
+                            .result()
+                            .cloned()
+                            .unwrap_or(QuestionsResult::Cancelled);
                     }
                 }
             }

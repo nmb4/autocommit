@@ -6,7 +6,7 @@ mod parser;
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use indicatif::{ProgressBar, ProgressStyle};
 use parser::{ExecutionStep, ParseResult};
 use ratatui::{backend::CrosstermBackend, layout::Rect, layout::Size, Terminal};
@@ -144,10 +144,7 @@ async fn run() -> Result<()> {
     let conventions = conventions::CommitConventions::discover_any(&ctx.repo_root)?;
 
     if conventions.is_some() {
-        println!(
-            "{} Loaded commit conventions",
-            "●".cyan()
-        );
+        println!("{} Loaded commit conventions", "●".cyan());
     }
 
     let prompt = ctx.to_prompt_with_conventions(conventions.as_ref());
@@ -165,7 +162,16 @@ async fn run() -> Result<()> {
         args.model.clone(),
     );
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
-    let raw_output = generate_plan(&client, &prompt, reasoning_effort, 0, None, conventions.as_ref(), args.long).await?;
+    let raw_output = generate_plan(
+        &client,
+        &prompt,
+        reasoning_effort,
+        0,
+        None,
+        conventions.as_ref(),
+        args.long,
+    )
+    .await?;
 
     if args.dry_run {
         println!("{}", "── Raw model output ──".dimmed());
@@ -197,6 +203,7 @@ async fn review_and_execute_plan(
     long_commits: bool,
 ) -> Result<()> {
     let mut retry_attempt = 0;
+    let mut long_commits = long_commits;
 
     loop {
         let parsed = parser::parse_commands(&raw_output)
@@ -210,16 +217,22 @@ async fn review_and_execute_plan(
                 );
                 return Ok(());
             }
-            ParseResult::Steps(steps) => {
-                match execute_or_retry(args, &steps, ctx, long_commits)? {
-                    PlanAction::Execute => return Ok(()),
-                    PlanAction::Retry => {}
-                    PlanAction::Abort => {
-                        println!("{} Aborted.", "✗".red());
-                        return Ok(());
-                    }
+            ParseResult::Steps(steps) => match execute_or_retry(args, &steps, ctx, long_commits)? {
+                PlanAction::Execute => return Ok(()),
+                PlanAction::Retry => {}
+                PlanAction::ToggleLongCommits => {
+                    long_commits = !long_commits;
+                    println!(
+                        "{} Using {} commit mode for next generation.",
+                        "●".cyan(),
+                        if long_commits { "long" } else { "short" }
+                    );
                 }
-            }
+                PlanAction::Abort => {
+                    println!("{} Aborted.", "✗".red());
+                    return Ok(());
+                }
+            },
         }
 
         retry_attempt += 1;
@@ -267,7 +280,12 @@ async fn generate_plan(
     result
 }
 
-fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext, long_commits: bool) -> Result<PlanAction> {
+fn execute_or_retry(
+    args: &Args,
+    steps: &[ExecutionStep],
+    ctx: &git::GitContext,
+    long_commits: bool,
+) -> Result<PlanAction> {
     let repo_root = &ctx.repo_root;
     let commit_count = steps
         .iter()
@@ -324,6 +342,7 @@ fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext,
         match prompt_for_plan_action(long_commits)? {
             PlanAction::Execute => {}
             PlanAction::Retry => return Ok(PlanAction::Retry),
+            PlanAction::ToggleLongCommits => return Ok(PlanAction::ToggleLongCommits),
             PlanAction::Abort => return Ok(PlanAction::Abort),
         }
     }
@@ -448,11 +467,15 @@ fn stage_hunks(repo_root: &str, hunk_ids: &[String], ctx: &git::GitContext) -> R
         stdin.write_all(partial_patch.as_bytes())?;
     }
 
-    let status = child.wait()
+    let status = child
+        .wait()
         .context("Failed to wait for git apply --cached")?;
 
     if !status.success() {
-        anyhow::bail!("git apply --cached failed with exit code {:?}", status.code());
+        anyhow::bail!(
+            "git apply --cached failed with exit code {:?}",
+            status.code()
+        );
     }
 
     Ok(())
@@ -473,58 +496,54 @@ fn spinner(msg: &str) -> ProgressBar {
 enum PlanAction {
     Execute,
     Retry,
+    ToggleLongCommits,
     Abort,
 }
 
-fn prompt_for_plan_action(_long_commits: bool) -> Result<PlanAction> {
-    let mut prompt = ActionPrompt::new(
-        "Ready to commit?".to_string(),
-        vec![],
-    );
+fn prompt_for_plan_action(long_commits: bool) -> Result<PlanAction> {
+    let mut prompt = ActionPrompt::new("Ready to commit?".to_string(), vec![], long_commits);
 
     let result = run_action_prompt(&mut prompt)?;
 
     match result {
         ActionResult::Accept => Ok(PlanAction::Execute),
         ActionResult::Retry { note: _ } => Ok(PlanAction::Retry),
+        ActionResult::ToggleLongCommits => Ok(PlanAction::ToggleLongCommits),
         ActionResult::Abort => Ok(PlanAction::Abort),
     }
 }
 
 fn run_action_prompt(prompt: &mut ActionPrompt) -> Result<ActionResult> {
-    enable_raw_mode()?;
+    // Get current cursor position and create dedicated prompt space if needed.
+    let cursor_pos = crossterm::cursor::position().unwrap_or((0, 0));
+    let terminal_size = crossterm::terminal::size().unwrap_or((80, 24));
 
-    // Get current cursor position and ensure we have enough space
-    let cursor_pos = crossterm::cursor::position()
-        .unwrap_or((0, 0));
-    let terminal_size = crossterm::terminal::size()
-        .unwrap_or((80, 24));
-
-    // Calculate needed space and scroll if necessary
     let prompt_height = prompt.desired_height(terminal_size.0);
     let available_space = terminal_size.1.saturating_sub(cursor_pos.1);
-
-    if available_space < prompt_height {
-        let needed_scroll = prompt_height - available_space;
-        for _ in 0..needed_scroll.saturating_sub(1) {
-            print!("\n");
+    let start_row = if available_space < prompt_height {
+        // Scroll enough to guarantee a full blank prompt block at the bottom.
+        let room_to_bottom = terminal_size.1.saturating_sub(cursor_pos.1.saturating_add(1));
+        let newlines = prompt_height.saturating_add(room_to_bottom);
+        for _ in 0..newlines {
+            print!("\r\n");
         }
         io::stdout().flush()?;
-    }
+        terminal_size.1.saturating_sub(prompt_height)
+    } else {
+        cursor_pos.1
+    };
+
+    enable_raw_mode()?;
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    // Use the final cursor position (after any scrolling)
-    let final_cursor_pos = crossterm::cursor::position()
-        .unwrap_or((0, 0));
-
-    let result = run_action_loop(&mut terminal, prompt, final_cursor_pos.1);
+    let result = run_action_loop(&mut terminal, prompt, start_row);
     disable_raw_mode()?;
 
     // Clear the prompt area
     let height = prompt.desired_height(terminal.size()?.width);
-    clear_prompt_area(final_cursor_pos.1, height)?;
+    clear_prompt_area(start_row, height)?;
 
     Ok(result)
 }
@@ -539,11 +558,12 @@ fn run_action_loop(
     loop {
         let size = terminal.size().unwrap_or_else(|_| Size::new(80, 24));
         let height = prompt.desired_height(size.width);
+        let effective_start_row = start_row.min(size.height.saturating_sub(height));
         let area = Rect::new(
             0,
-            start_row,
+            effective_start_row,
             size.width,
-            height.min(size.height.saturating_sub(start_row)),
+            height.min(size.height.saturating_sub(effective_start_row)),
         );
 
         terminal
