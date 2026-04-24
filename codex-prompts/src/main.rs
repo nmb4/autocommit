@@ -1,14 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use crossterm::event::{self, Event, KeyEventKind};
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::Rect;
 use ratatui::layout::Size;
 use ratatui::Terminal;
-use std::io;
+use std::io::{self, Write};
 
 use codex_prompts::approve::ApproveResult;
 use codex_prompts::questions::QuestionsResult;
@@ -45,23 +43,45 @@ fn main() -> Result<()> {
     }
 }
 
-fn setup_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+fn setup_terminal() -> Result<(Terminal<CrosstermBackend<io::Stdout>>, u16)> {
     enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    crossterm::execute!(stdout, EnterAlternateScreen)?;
+
+    // Get current cursor position before starting prompt
+    let cursor_pos = crossterm::cursor::position()
+        .unwrap_or((0, 0));
+
     let backend = CrosstermBackend::new(io::stdout());
     let terminal = Terminal::new(backend)?;
-    Ok(terminal)
+
+    Ok((terminal, cursor_pos.1))
 }
 
 fn restore_terminal() -> Result<()> {
-    crossterm::execute!(io::stdout(), LeaveAlternateScreen)?;
     disable_raw_mode()?;
     Ok(())
 }
 
+fn clear_prompt_area(start_row: u16, height: u16) -> Result<()> {
+    // Move back to the start of the prompt area
+    let mut current_row = start_row.saturating_add(height).saturating_sub(1);
+    let target_row = start_row;
+
+    while current_row > target_row {
+        print!("\x1b[{};H", current_row + 1); // Move to row
+        print!("\x1b[2K"); // Clear line
+        current_row = current_row.saturating_sub(1);
+    }
+
+    // Clear the first line and position cursor there
+    print!("\x1b[{};H", target_row + 1);
+    print!("\x1b[2K");
+    io::stdout().flush()?;
+
+    Ok(())
+}
+
 fn run_select() -> Result<()> {
-    let mut terminal = setup_terminal()?;
+    let (mut terminal, start_row) = setup_terminal()?;
 
     let items = vec![
         SelectItem {
@@ -89,18 +109,24 @@ fn run_select() -> Result<()> {
     let mut prompt = SelectPrompt::new("Select Approval Mode".to_string(), items)
         .with_subtitle("Choose how Codex interacts with your files".to_string());
 
-    let result = run_prompt_loop(&mut terminal, &mut prompt);
+    let result = run_prompt_loop(&mut terminal, &mut prompt, start_row);
     restore_terminal()?;
 
-    match result {
+    // Clear the prompt area
+    let height = prompt.desired_height(terminal.size()?.width);
+    clear_prompt_area(start_row, height)?;
+
+    // Print result to normal buffer
+    match &result {
         SelectResult::Selected(idx) => println!("Selected: index {idx}"),
         SelectResult::Cancelled => println!("Cancelled"),
     }
+
     Ok(())
 }
 
 fn run_approve() -> Result<()> {
-    let mut terminal = setup_terminal()?;
+    let (mut terminal, start_row) = setup_terminal()?;
 
     let choices = vec![
         ApproveChoice {
@@ -123,18 +149,24 @@ fn run_approve() -> Result<()> {
     )
     .with_detail("$ git add -A && git commit -m \"feat: add new feature\"".to_string());
 
-    let result = run_approve_loop(&mut terminal, &mut prompt);
+    let result = run_approve_loop(&mut terminal, &mut prompt, start_row);
     restore_terminal()?;
 
-    match result {
+    // Clear the prompt area
+    let height = prompt.desired_height(terminal.size()?.width);
+    clear_prompt_area(start_row, height)?;
+
+    // Print result to normal buffer
+    match &result {
         ApproveResult::Choice(idx) => println!("Choice: index {idx}"),
         ApproveResult::Cancelled => println!("Cancelled"),
     }
+
     Ok(())
 }
 
 fn run_questions() -> Result<()> {
-    let mut terminal = setup_terminal()?;
+    let (mut terminal, start_row) = setup_terminal()?;
 
     let questions = vec![
         Question {
@@ -166,10 +198,15 @@ fn run_questions() -> Result<()> {
 
     let mut prompt = QuestionsPrompt::new(questions);
 
-    let result = run_questions_loop(&mut terminal, &mut prompt);
+    let result = run_questions_loop(&mut terminal, &mut prompt, start_row);
     restore_terminal()?;
 
-    match result {
+    // Clear the prompt area
+    let height = prompt.desired_height(terminal.size()?.width);
+    clear_prompt_area(start_row, height)?;
+
+    // Print result to normal buffer
+    match &result {
         QuestionsResult::Answered(answers) => {
             for (i, answer) in answers.iter().enumerate() {
                 println!(
@@ -182,11 +219,12 @@ fn run_questions() -> Result<()> {
         }
         QuestionsResult::Cancelled => println!("Cancelled"),
     }
+
     Ok(())
 }
 
 fn run_retry() -> Result<()> {
-    let mut terminal = setup_terminal()?;
+    let (mut terminal, start_row) = setup_terminal()?;
 
     let detail_lines = vec![
         "feat(cli): add retry prompt for generation review".to_string(),
@@ -205,10 +243,15 @@ fn run_retry() -> Result<()> {
         detail_lines,
     );
 
-    let result = run_retry_loop(&mut terminal, &mut prompt);
+    let result = run_retry_loop(&mut terminal, &mut prompt, start_row);
     restore_terminal()?;
 
-    match result {
+    // Clear the prompt area
+    let height = prompt.desired_height(terminal.size()?.width);
+    clear_prompt_area(start_row, height)?;
+
+    // Print result to normal buffer
+    match &result {
         RetryResult::Accept => println!("Accepted"),
         RetryResult::Retry { note } => {
             if note.is_empty() {
@@ -219,21 +262,25 @@ fn run_retry() -> Result<()> {
         }
         RetryResult::Abort => println!("Aborted"),
     }
+
     Ok(())
 }
 
 fn run_prompt_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     prompt: &mut SelectPrompt,
+    start_row: u16,
 ) -> SelectResult {
     loop {
         let size = terminal.size().unwrap_or_else(|_| Size::new(80, 24));
         let height = prompt.desired_height(size.width);
+
+        // Position the prompt starting from the current cursor row
         let area = Rect::new(
             0,
-            size.height.saturating_sub(height),
+            start_row,
             size.width,
-            height.min(size.height),
+            height.min(size.height.saturating_sub(start_row)),
         );
 
         terminal
@@ -259,15 +306,16 @@ fn run_prompt_loop(
 fn run_approve_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     prompt: &mut ApprovePrompt,
+    start_row: u16,
 ) -> ApproveResult {
     loop {
         let size = terminal.size().unwrap_or_else(|_| Size::new(80, 24));
         let height = prompt.desired_height(size.width);
         let area = Rect::new(
             0,
-            size.height.saturating_sub(height),
+            start_row,
             size.width,
-            height.min(size.height),
+            height.min(size.height.saturating_sub(start_row)),
         );
 
         terminal
@@ -293,15 +341,16 @@ fn run_approve_loop(
 fn run_questions_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     prompt: &mut QuestionsPrompt,
+    start_row: u16,
 ) -> QuestionsResult {
     loop {
         let size = terminal.size().unwrap_or_else(|_| Size::new(80, 24));
         let height = prompt.desired_height(size.width);
         let area = Rect::new(
             0,
-            size.height.saturating_sub(height),
+            start_row,
             size.width,
-            height.min(size.height),
+            height.min(size.height.saturating_sub(start_row)),
         );
 
         terminal
@@ -327,15 +376,16 @@ fn run_questions_loop(
 fn run_retry_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     prompt: &mut RetryPrompt,
+    start_row: u16,
 ) -> RetryResult {
     loop {
         let size = terminal.size().unwrap_or_else(|_| Size::new(80, 24));
         let height = prompt.desired_height(size.width);
         let area = Rect::new(
             0,
-            size.height.saturating_sub(height),
+            start_row,
             size.width,
-            height.min(size.height),
+            height.min(size.height.saturating_sub(start_row)),
         );
 
         terminal
