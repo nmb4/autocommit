@@ -8,12 +8,10 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Widget;
-use unicode_width::UnicodeWidthStr;
 
 use crate::scroll_state::ScrollState;
 use crate::selection_rendering::{render_menu_surface, menu_surface_padding_height};
 
-/// Result of a retry prompt.
 #[derive(Debug, Clone)]
 pub enum RetryResult {
     Accept,
@@ -40,6 +38,19 @@ pub struct RetryPrompt {
 const ACCEPT: usize = 0;
 const RETRY: usize = 1;
 const NUM_CHOICES: usize = 3;
+const PLACEHOLDER: &str = "focus…";
+
+struct ChoiceDef {
+    label: &'static str,
+    shortcut: char,
+    has_note: bool,
+}
+
+const CHOICES: [ChoiceDef; 3] = [
+    ChoiceDef { label: "Accept", shortcut: 'a', has_note: false },
+    ChoiceDef { label: "Retry", shortcut: 'r', has_note: true },
+    ChoiceDef { label: "Abort", shortcut: 'n', has_note: false },
+];
 
 impl RetryPrompt {
     pub fn new(message: String, detail_lines: Vec<String>) -> Self {
@@ -71,8 +82,16 @@ impl RetryPrompt {
 
         match self.focus {
             Focus::Options => {
-                // Shortcuts only active in options mode
                 if let KeyCode::Char(c) = key.code {
+                    // Number shortcuts (always active alongside letter shortcuts)
+                    if let Some(digit) = c.to_digit(10) {
+                        if digit >= 1 && digit as usize <= NUM_CHOICES {
+                            self.state.selected_idx = Some((digit - 1) as usize);
+                            self.submit();
+                            return;
+                        }
+                    }
+                    // Letter shortcuts
                     match c {
                         'a' => {
                             self.result = Some(RetryResult::Accept);
@@ -91,25 +110,20 @@ impl RetryPrompt {
                             self.done = true;
                             return;
                         }
-                        // j/k handled below
-                        'j' | 'k' => {}
+                        'j' | 'k' => {} // fall through to navigation
                         _ => return,
                     }
                 }
                 match key.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        self.move_up();
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        self.move_down();
-                    }
+                    KeyCode::Up | KeyCode::Char('k') => self.move_up(),
+                    KeyCode::Down | KeyCode::Char('j') => self.move_down(),
                     KeyCode::Tab => {
-                        self.state.selected_idx = Some(RETRY);
-                        self.focus = Focus::Note;
+                        // Only open note input when Retry is highlighted
+                        if self.state.selected_idx == Some(RETRY) {
+                            self.focus = Focus::Note;
+                        }
                     }
-                    KeyCode::Enter => {
-                        self.submit();
-                    }
+                    KeyCode::Enter => self.submit(),
                     KeyCode::Esc => {
                         self.result = Some(RetryResult::Abort);
                         self.done = true;
@@ -117,34 +131,24 @@ impl RetryPrompt {
                     _ => {}
                 }
             }
-            Focus::Note => {
-                // In note mode, char keys go to the draft — no shortcuts
-                match key.code {
-                    KeyCode::Tab | KeyCode::Esc => {
-                        self.focus = Focus::Options;
-                    }
-                    KeyCode::Enter => {
-                        self.submit();
-                    }
-                    KeyCode::Backspace => {
-                        self.note_draft.pop();
-                    }
-                    KeyCode::Up => {
-                        self.move_up();
-                    }
-                    KeyCode::Down => {
-                        self.move_down();
-                    }
-                    KeyCode::Char(c) => {
-                        self.note_draft.push(c);
-                    }
-                    _ => {}
+            Focus::Note => match key.code {
+                KeyCode::Tab | KeyCode::Esc => {
+                    self.focus = Focus::Options;
                 }
-            }
+                KeyCode::Enter => self.submit(),
+                KeyCode::Backspace => {
+                    self.note_draft.pop();
+                }
+                KeyCode::Up => self.move_up(),
+                KeyCode::Down => self.move_down(),
+                KeyCode::Char(c) => {
+                    self.note_draft.push(c);
+                }
+                _ => {}
+            },
         }
     }
 
-    /// Move up without wrapping — clamp at 0.
     fn move_up(&mut self) {
         if let Some(idx) = self.state.selected_idx {
             if idx > 0 {
@@ -153,7 +157,6 @@ impl RetryPrompt {
         }
     }
 
-    /// Move down without wrapping — clamp at last item.
     fn move_down(&mut self) {
         if let Some(idx) = self.state.selected_idx {
             if idx + 1 < NUM_CHOICES {
@@ -165,33 +168,25 @@ impl RetryPrompt {
     fn submit(&mut self) {
         let note = self.note_draft.clone();
         match self.state.selected_idx {
-            Some(ACCEPT) => {
-                self.result = Some(RetryResult::Accept);
-            }
-            Some(RETRY) => {
-                self.result = Some(RetryResult::Retry { note });
-            }
-            _ => {
-                self.result = Some(RetryResult::Abort);
-            }
+            Some(ACCEPT) => self.result = Some(RetryResult::Accept),
+            Some(RETRY) => self.result = Some(RetryResult::Retry { note }),
+            _ => self.result = Some(RetryResult::Abort),
         }
         self.done = true;
     }
 
-    fn should_show_cursor(&self) -> bool {
-        let millis = std::time::SystemTime::now()
+    fn cursor_visible(&self) -> bool {
+        let ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis();
-        (millis % 1000) < 500
+        (ms % 1000) < 500
     }
 
     pub fn desired_height(&self, _width: u16) -> u16 {
-        let header = 1u16
-            + self.detail_lines.len() as u16
-            + 1; // blank line
+        let header = 1u16 + self.detail_lines.len() as u16 + 1;
         let rows = NUM_CHOICES as u16;
-        let spacer = 1u16; // blank line before footer
+        let spacer = 1u16;
         let footer = 1u16;
         let padding = menu_surface_padding_height();
         header + rows + spacer + footer + padding
@@ -207,6 +202,7 @@ impl RetryPrompt {
         }
 
         let mut y = content_area.y;
+        let max_y = content_area.y + content_area.height;
 
         // Header
         Line::from(self.message.clone().bold()).render(
@@ -216,130 +212,100 @@ impl RetryPrompt {
         y += 1;
 
         for line in &self.detail_lines {
-            if y >= content_area.y + content_area.height {
-                return;
-            }
+            if y >= max_y { return; }
             Line::from(line.clone()).render(
                 Rect { x: content_area.x, y, width: content_area.width, height: 1 },
                 buf,
             );
             y += 1;
         }
-
         y += 1; // spacer
 
-        // Choices — hide shortcut labels when in note mode
-        let hide_shortcuts = self.focus == Focus::Note;
-        let choices = [
-            ("Accept", 'a', false),
-            ("Retry", 'r', true),
-            ("Abort", 'n', false),
-        ];
-        for (idx, (label, shortcut, supports_note)) in choices.iter().enumerate() {
-            if y >= content_area.y + content_area.height {
-                break;
-            }
+        // Choices
+        for (idx, choice) in CHOICES.iter().enumerate() {
+            if y >= max_y { break; }
             let is_selected = self.state.selected_idx == Some(idx);
-            let prefix = if is_selected { '›' } else { ' ' };
-            let shortcut_part = if hide_shortcuts {
-                String::new()
-            } else {
-                format!(" ({shortcut})")
-            };
+            let is_note_focused = self.focus == Focus::Note;
+            let has_text = !self.note_draft.is_empty();
 
-            let row_text = format!("{prefix} {}. {}{shortcut_part}", idx + 1, label);
-            let style = if is_selected {
+            // Build spans for this row
+            let mut spans: Vec<Span> = Vec::new();
+            let row_style = if is_selected {
                 Style::default().fg(Color::Cyan).bold()
             } else {
                 Style::default()
             };
-            let row_width = UnicodeWidthStr::width(row_text.as_str()) as u16;
-            Span::styled(row_text.clone(), style).render(
-                Rect {
-                    x: content_area.x,
-                    y,
-                    width: row_width.min(content_area.width),
-                    height: 1,
-                },
-                buf,
-            );
+            let dim = Style::default().dim();
 
-            // Inline note on the retry row
-            if is_selected && *supports_note {
-                let remaining = content_area.width.saturating_sub(row_width).saturating_sub(3);
-                if remaining > 0 {
-                    if self.focus == Focus::Note {
-                        let cursor = if self.should_show_cursor() { "█" } else { " " };
-                        let note_preview = if self.note_draft.is_empty() {
-                            format!(" {cursor}")
-                        } else {
-                            let max = remaining.saturating_sub(1) as usize;
-                            let truncated: String = self.note_draft.chars().take(max).collect();
-                            format!(" {truncated}{cursor}")
-                        };
-                        Span::styled(note_preview, Style::default().fg(Color::Yellow)).render(
-                            Rect {
-                                x: content_area.x + row_width.min(content_area.width),
-                                y,
-                                width: content_area.width.saturating_sub(row_width.min(content_area.width)),
-                                height: 1,
-                            },
-                            buf,
-                        );
-                    } else if !self.note_draft.is_empty() {
-                        let max = remaining.saturating_sub(1) as usize;
-                        let truncated: String = self.note_draft.chars().take(max).collect();
-                        Span::styled(format!(" {truncated}"), Style::default().dim()).render(
-                            Rect {
-                                x: content_area.x + row_width.min(content_area.width),
-                                y,
-                                width: content_area.width.saturating_sub(row_width.min(content_area.width)),
-                                height: 1,
-                            },
-                            buf,
-                        );
+            let prefix = if is_selected { "› " } else { "  " };
+            spans.push(Span::styled(format!("{prefix}{}. {}", idx + 1, choice.label), row_style));
+
+            // Note input zone — only on the retry row when selected
+            if is_selected && choice.has_note {
+                if has_text {
+                    // Comma + space + user text
+                    spans.push(Span::styled(", ", dim));
+                    let note_style = if is_note_focused {
+                        Style::default().fg(Color::Blue)
+                    } else {
+                        dim
+                    };
+                    spans.push(Span::styled(self.note_draft.clone(), note_style));
+                    // Cursor
+                    if is_note_focused {
+                        let cursor = if self.cursor_visible() { "█" } else { " " };
+                        spans.push(Span::styled(cursor, Style::default().fg(Color::Blue)));
                     }
+                    // Shortcut at end
+                    spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
+                } else if is_note_focused {
+                    // Ghost placeholder + cursor, shortcut at end
+                    spans.push(Span::styled(" ", Style::default()));
+                    spans.push(Span::styled(PLACEHOLDER, Style::default().fg(Color::DarkGray).dim()));
+                    let cursor = if self.cursor_visible() { "█" } else { " " };
+                    spans.push(Span::styled(cursor, Style::default().fg(Color::Blue)));
+                    spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
+                } else {
+                    // Not focused, no text — shortcut right after label
+                    spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
                 }
+            } else {
+                // Non-note rows — always show shortcut dimmed
+                spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
             }
 
+            Line::from(spans).render(
+                Rect { x: content_area.x, y, width: content_area.width, height: 1 },
+                buf,
+            );
             y += 1;
         }
 
-        // Spacer line before footer
+        // Spacer before footer
         y += 1;
 
-        // Footer hints — white keys, dimmed text, centered dot separator
-        if y < content_area.y + content_area.height {
+        // Footer hints
+        if y < max_y {
             let sep = Span::styled(" · ", Style::default().dim());
             let dim = Style::default().dim();
-            let white = Style::default().fg(Color::White);
+            let w = Style::default().fg(Color::White);
 
             let spans: Vec<Span> = match self.focus {
                 Focus::Options => vec![
-                    Span::styled("tab", white),
-                    Span::styled(" add note", dim),
+                    Span::styled("tab", w), Span::styled(" add note", dim),
                     sep.clone(),
-                    Span::styled("enter", white),
-                    Span::styled(" confirm", dim),
+                    Span::styled("enter", w), Span::styled(" confirm", dim),
                     sep.clone(),
-                    Span::styled("esc", white),
-                    Span::styled(" abort", dim),
+                    Span::styled("esc", w), Span::styled(" abort", dim),
                 ],
                 Focus::Note => vec![
-                    Span::styled("tab/esc", white),
-                    Span::styled(" close note", dim),
+                    Span::styled("tab/esc", w), Span::styled(" close note", dim),
                     sep.clone(),
-                    Span::styled("enter", white),
-                    Span::styled(" confirm", dim),
+                    Span::styled("enter", w), Span::styled(" confirm", dim),
                 ],
             };
             Line::from(spans).render(
-                Rect {
-                    x: content_area.x + 2,
-                    y,
-                    width: content_area.width.saturating_sub(2),
-                    height: 1,
-                },
+                Rect { x: content_area.x + 2, y, width: content_area.width.saturating_sub(2), height: 1 },
                 buf,
             );
         }
