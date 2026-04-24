@@ -13,7 +13,7 @@ use crate::scroll_state::ScrollState;
 use crate::selection_rendering::{render_menu_surface, menu_surface_padding_height};
 
 #[derive(Debug, Clone)]
-pub enum RetryResult {
+pub enum ActionResult {
     Accept,
     Retry { note: String },
     Abort,
@@ -25,20 +25,20 @@ enum Focus {
     Note,
 }
 
-pub struct RetryPrompt {
+pub struct ActionPrompt {
     message: String,
     detail_lines: Vec<String>,
     state: ScrollState,
     focus: Focus,
     note_draft: String,
     done: bool,
-    result: Option<RetryResult>,
+    result: Option<ActionResult>,
 }
 
 const ACCEPT: usize = 0;
 const RETRY: usize = 1;
 const NUM_CHOICES: usize = 3;
-const PLACEHOLDER: &str = "focus…";
+const PLACEHOLDER: &str = "note…";
 
 struct ChoiceDef {
     label: &'static str,
@@ -52,7 +52,7 @@ const CHOICES: [ChoiceDef; 3] = [
     ChoiceDef { label: "Abort", shortcut: 'n', has_note: false },
 ];
 
-impl RetryPrompt {
+impl ActionPrompt {
     pub fn new(message: String, detail_lines: Vec<String>) -> Self {
         let mut state = ScrollState::new();
         state.selected_idx = Some(ACCEPT);
@@ -71,7 +71,7 @@ impl RetryPrompt {
         self.done
     }
 
-    pub fn result(&self) -> Option<&RetryResult> {
+    pub fn result(&self) -> Option<&ActionResult> {
         self.result.as_ref()
     }
 
@@ -83,7 +83,7 @@ impl RetryPrompt {
         match self.focus {
             Focus::Options => {
                 if let KeyCode::Char(c) = key.code {
-                    // Number shortcuts (always active alongside letter shortcuts)
+                    // Number shortcuts
                     if let Some(digit) = c.to_digit(10) {
                         if digit >= 1 && digit as usize <= NUM_CHOICES {
                             self.state.selected_idx = Some((digit - 1) as usize);
@@ -94,23 +94,23 @@ impl RetryPrompt {
                     // Letter shortcuts
                     match c {
                         'a' => {
-                            self.result = Some(RetryResult::Accept);
+                            self.result = Some(ActionResult::Accept);
                             self.done = true;
                             return;
                         }
                         'r' => {
-                            self.result = Some(RetryResult::Retry {
+                            self.result = Some(ActionResult::Retry {
                                 note: self.note_draft.clone(),
                             });
                             self.done = true;
                             return;
                         }
                         'n' | 'q' => {
-                            self.result = Some(RetryResult::Abort);
+                            self.result = Some(ActionResult::Abort);
                             self.done = true;
                             return;
                         }
-                        'j' | 'k' => {} // fall through to navigation
+                        'j' | 'k' => {}
                         _ => return,
                     }
                 }
@@ -118,14 +118,13 @@ impl RetryPrompt {
                     KeyCode::Up | KeyCode::Char('k') => self.move_up(),
                     KeyCode::Down | KeyCode::Char('j') => self.move_down(),
                     KeyCode::Tab => {
-                        // Only open note input when Retry is highlighted
                         if self.state.selected_idx == Some(RETRY) {
                             self.focus = Focus::Note;
                         }
                     }
                     KeyCode::Enter => self.submit(),
                     KeyCode::Esc => {
-                        self.result = Some(RetryResult::Abort);
+                        self.result = Some(ActionResult::Abort);
                         self.done = true;
                     }
                     _ => {}
@@ -139,8 +138,6 @@ impl RetryPrompt {
                 KeyCode::Backspace => {
                     self.note_draft.pop();
                 }
-                KeyCode::Up => self.move_up(),
-                KeyCode::Down => self.move_down(),
                 KeyCode::Char(c) => {
                     self.note_draft.push(c);
                 }
@@ -168,9 +165,9 @@ impl RetryPrompt {
     fn submit(&mut self) {
         let note = self.note_draft.clone();
         match self.state.selected_idx {
-            Some(ACCEPT) => self.result = Some(RetryResult::Accept),
-            Some(RETRY) => self.result = Some(RetryResult::Retry { note }),
-            _ => self.result = Some(RetryResult::Abort),
+            Some(ACCEPT) => self.result = Some(ActionResult::Accept),
+            Some(RETRY) => self.result = Some(ActionResult::Retry { note }),
+            _ => self.result = Some(ActionResult::Abort),
         }
         self.done = true;
     }
@@ -186,10 +183,9 @@ impl RetryPrompt {
     pub fn desired_height(&self, _width: u16) -> u16 {
         let header = 1u16 + self.detail_lines.len() as u16 + 1;
         let rows = NUM_CHOICES as u16;
-        let spacer = 1u16;
         let footer = 1u16;
         let padding = menu_surface_padding_height();
-        header + rows + spacer + footer + padding
+        header + rows + footer + padding
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -228,7 +224,6 @@ impl RetryPrompt {
             let is_note_focused = self.focus == Focus::Note;
             let has_text = !self.note_draft.is_empty();
 
-            // Build spans for this row
             let mut spans: Vec<Span> = Vec::new();
             let row_style = if is_selected {
                 Style::default().fg(Color::Cyan).bold()
@@ -240,10 +235,8 @@ impl RetryPrompt {
             let prefix = if is_selected { "› " } else { "  " };
             spans.push(Span::styled(format!("{prefix}{}. {}", idx + 1, choice.label), row_style));
 
-            // Note input zone — only on the retry row when selected
             if is_selected && choice.has_note {
                 if has_text {
-                    // Comma + space + user text
                     spans.push(Span::styled(", ", dim));
                     let note_style = if is_note_focused {
                         Style::default().fg(Color::Blue)
@@ -251,26 +244,21 @@ impl RetryPrompt {
                         dim
                     };
                     spans.push(Span::styled(self.note_draft.clone(), note_style));
-                    // Cursor
                     if is_note_focused {
                         let cursor = if self.cursor_visible() { "█" } else { " " };
                         spans.push(Span::styled(cursor, Style::default().fg(Color::Blue)));
                     }
-                    // Shortcut at end
                     spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
                 } else if is_note_focused {
-                    // Ghost placeholder + cursor, shortcut at end
                     spans.push(Span::styled(" ", Style::default()));
                     spans.push(Span::styled(PLACEHOLDER, Style::default().fg(Color::DarkGray).dim()));
                     let cursor = if self.cursor_visible() { "█" } else { " " };
                     spans.push(Span::styled(cursor, Style::default().fg(Color::Blue)));
                     spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
                 } else {
-                    // Not focused, no text — shortcut right after label
                     spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
                 }
             } else {
-                // Non-note rows — always show shortcut dimmed
                 spans.push(Span::styled(format!(" ({})", choice.shortcut), dim));
             }
 
@@ -281,10 +269,7 @@ impl RetryPrompt {
             y += 1;
         }
 
-        // Spacer before footer
-        y += 1;
-
-        // Footer hints
+        // Minimal footer hints
         if y < max_y {
             let sep = Span::styled(" · ", Style::default().dim());
             let dim = Style::default().dim();
@@ -292,16 +277,16 @@ impl RetryPrompt {
 
             let spans: Vec<Span> = match self.focus {
                 Focus::Options => vec![
-                    Span::styled("tab", w), Span::styled(" add note", dim),
+                    Span::styled("enter", w), Span::styled("confirm", dim),
                     sep.clone(),
-                    Span::styled("enter", w), Span::styled(" confirm", dim),
+                    Span::styled("tab", w), Span::styled("note", dim),
                     sep.clone(),
-                    Span::styled("esc", w), Span::styled(" abort", dim),
+                    Span::styled("esc", w), Span::styled("abort", dim),
                 ],
                 Focus::Note => vec![
-                    Span::styled("tab/esc", w), Span::styled(" close note", dim),
+                    Span::styled("tab/esc", w), Span::styled("done", dim),
                     sep.clone(),
-                    Span::styled("enter", w), Span::styled(" confirm", dim),
+                    Span::styled("enter", w), Span::styled("confirm", dim),
                 ],
             };
             Line::from(spans).render(

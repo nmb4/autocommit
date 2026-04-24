@@ -14,7 +14,7 @@ use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use codex_prompts::{RetryPrompt, RetryResult};
+use codex_prompts::{ActionPrompt, ActionResult};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 #[value(rename_all = "lowercase")]
@@ -476,57 +476,64 @@ enum PlanAction {
     Abort,
 }
 
-fn prompt_for_plan_action(long_commits: bool) -> Result<PlanAction> {
-    // Build detail lines from the current plan (which is shown above the prompt)
-    // We'll show a simple message since the full plan is already displayed
-    let detail_lines = vec![
-        "The full commit plan is shown above.".to_string(),
-        format!("Long commits: {}", if long_commits { "enabled" } else { "disabled" }),
-        "".to_string(),
-        "Enter: Execute plan".to_string(),
-        "r: Retry generation".to_string(),
-        "n: Abort".to_string(),
-    ];
-
-    let mut prompt = RetryPrompt::new(
-        "Commit Plan Ready".to_string(),
-        detail_lines,
+fn prompt_for_plan_action(_long_commits: bool) -> Result<PlanAction> {
+    let mut prompt = ActionPrompt::new(
+        "Ready to commit?".to_string(),
+        vec![],
     );
 
-    let result = run_retry_prompt(&mut prompt)?;
+    let result = run_action_prompt(&mut prompt)?;
 
     match result {
-        RetryResult::Accept => Ok(PlanAction::Execute),
-        RetryResult::Retry { note: _ } => Ok(PlanAction::Retry),
-        RetryResult::Abort => Ok(PlanAction::Abort),
+        ActionResult::Accept => Ok(PlanAction::Execute),
+        ActionResult::Retry { note: _ } => Ok(PlanAction::Retry),
+        ActionResult::Abort => Ok(PlanAction::Abort),
     }
 }
 
-fn run_retry_prompt(prompt: &mut RetryPrompt) -> Result<RetryResult> {
+fn run_action_prompt(prompt: &mut ActionPrompt) -> Result<ActionResult> {
     enable_raw_mode()?;
 
-    // Get current cursor position before starting prompt
+    // Get current cursor position and ensure we have enough space
     let cursor_pos = crossterm::cursor::position()
         .unwrap_or((0, 0));
+    let terminal_size = crossterm::terminal::size()
+        .unwrap_or((80, 24));
+
+    // Calculate needed space and scroll if necessary
+    let prompt_height = prompt.desired_height(terminal_size.0);
+    let available_space = terminal_size.1.saturating_sub(cursor_pos.1);
+
+    if available_space < prompt_height {
+        let needed_scroll = prompt_height - available_space;
+        for _ in 0..needed_scroll.saturating_sub(1) {
+            print!("\n");
+        }
+        io::stdout().flush()?;
+    }
 
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_retry_loop(&mut terminal, prompt, cursor_pos.1);
+    // Use the final cursor position (after any scrolling)
+    let final_cursor_pos = crossterm::cursor::position()
+        .unwrap_or((0, 0));
+
+    let result = run_action_loop(&mut terminal, prompt, final_cursor_pos.1);
     disable_raw_mode()?;
 
     // Clear the prompt area
     let height = prompt.desired_height(terminal.size()?.width);
-    clear_prompt_area(cursor_pos.1, height)?;
+    clear_prompt_area(final_cursor_pos.1, height)?;
 
     Ok(result)
 }
 
-fn run_retry_loop(
+fn run_action_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    prompt: &mut RetryPrompt,
+    prompt: &mut ActionPrompt,
     start_row: u16,
-) -> RetryResult {
+) -> ActionResult {
     use crossterm::event::{self, Event, KeyEventKind};
 
     loop {
@@ -551,7 +558,7 @@ fn run_retry_loop(
                 if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
                     prompt.handle_key(key);
                     if prompt.is_done() {
-                        return prompt.result().cloned().unwrap_or(RetryResult::Abort);
+                        return prompt.result().cloned().unwrap_or(ActionResult::Abort);
                     }
                 }
             }

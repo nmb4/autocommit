@@ -10,7 +10,7 @@ use std::io::{self, Write};
 
 use codex_prompts::approve::ApproveResult;
 use codex_prompts::questions::QuestionsResult;
-use codex_prompts::retry::RetryResult;
+use codex_prompts::action::ActionResult;
 use codex_prompts::select::SelectResult;
 use codex_prompts::*;
 
@@ -227,19 +227,18 @@ fn run_retry() -> Result<()> {
     let (mut terminal, start_row) = setup_terminal()?;
 
     let detail_lines = vec![
-        "feat(cli): add retry prompt for generation review".to_string(),
+        "feat(cli): add action prompt for user actions".to_string(),
         "".to_string(),
-        "This adds a new RetryPrompt type that mirrors the autocommit".to_string(),
-        "approval flow: Accept / Retry (default, with optional focus".to_string(),
-        "note via tab) / Abort.".to_string(),
+        "This adds a new ActionPrompt type that accepts user input".to_string(),
+        "with options: Accept / Retry (with note) / Abort.".to_string(),
         "".to_string(),
-        "  codex-prompts/src/retry.rs  | 85 ++++++++++".to_string(),
+        "  codex-prompts/src/action.rs  | 85 ++++++++++".to_string(),
         "  codex-prompts/src/main.rs   | 42 +++++".to_string(),
         "  2 files changed, 127 insertions(+)".to_string(),
     ];
 
-    let mut prompt = RetryPrompt::new(
-        "Proposed commit message".to_string(),
+    let mut prompt = ActionPrompt::new(
+        "Action Required".to_string(),
         detail_lines,
     );
 
@@ -252,15 +251,15 @@ fn run_retry() -> Result<()> {
 
     // Print result to normal buffer
     match &result {
-        RetryResult::Accept => println!("Accepted"),
-        RetryResult::Retry { note } => {
+        ActionResult::Accept => println!("Accepted"),
+        ActionResult::Retry { note } => {
             if note.is_empty() {
                 println!("Retry (no note)");
             } else {
                 println!("Retry with note: {note:?}");
             }
         }
-        RetryResult::Abort => println!("Aborted"),
+        ActionResult::Abort => println!("Aborted"),
     }
 
     Ok(())
@@ -375,9 +374,9 @@ fn run_questions_loop(
 
 fn run_retry_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    prompt: &mut RetryPrompt,
+    prompt: &mut ActionPrompt,
     start_row: u16,
-) -> RetryResult {
+) -> ActionResult {
     loop {
         let size = terminal.size().unwrap_or_else(|_| Size::new(80, 24));
         let height = prompt.desired_height(size.width);
@@ -400,7 +399,7 @@ fn run_retry_loop(
                 if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
                     prompt.handle_key(key);
                     if prompt.is_done() {
-                        return prompt.result().cloned().unwrap_or(RetryResult::Abort);
+                        return prompt.result().cloned().unwrap_or(ActionResult::Abort);
                     }
                 }
             }
