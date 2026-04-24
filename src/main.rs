@@ -293,7 +293,6 @@ fn execute_or_retry(
         .count();
 
     // ── Display plan ─────────────────────────────────────────────────────────
-    println!();
     println!(
         "{} {} step{} planned ({} commit{}):",
         "●".cyan().bold(),
@@ -302,7 +301,6 @@ fn execute_or_retry(
         commit_count,
         if commit_count == 1 { "" } else { "s" }
     );
-    println!();
 
     for (i, step) in steps.iter().enumerate() {
         let num = format!("[{}/{}]", i + 1, steps.len()).dimmed();
@@ -325,16 +323,18 @@ fn execute_or_retry(
                         println!("      {} {}", "~".cyan(), hunk_id.dimmed());
                     }
                 }
-                for file in &group.files {
-                    println!("      {} {}", "+".cyan(), file.dimmed());
-                }
                 for cmd in &group.add_commands {
                     println!("      {}", cmd.raw.dimmed());
+                }
+                for file in &group.files {
+                    println!("      {} {}", "+".cyan(), file.dimmed());
                 }
                 println!("      {}", group.commit_command.raw.dimmed());
             }
         }
-        println!();
+        if i + 1 < steps.len() {
+            println!();
+        }
     }
 
     // ── Confirm ──────────────────────────────────────────────────────────────
@@ -348,8 +348,6 @@ fn execute_or_retry(
     }
 
     // ── Execute ─────────────────────────────────────────────────────────────
-    println!();
-
     for (i, step) in steps.iter().enumerate() {
         let label = format!("[{}/{}]", i + 1, steps.len());
 
@@ -522,7 +520,9 @@ fn run_action_prompt(prompt: &mut ActionPrompt) -> Result<ActionResult> {
     let available_space = terminal_size.1.saturating_sub(cursor_pos.1);
     let start_row = if available_space < prompt_height {
         // Scroll enough to guarantee a full blank prompt block at the bottom.
-        let room_to_bottom = terminal_size.1.saturating_sub(cursor_pos.1.saturating_add(1));
+        let room_to_bottom = terminal_size
+            .1
+            .saturating_sub(cursor_pos.1.saturating_add(1));
         let newlines = prompt_height.saturating_add(room_to_bottom);
         for _ in 0..newlines {
             print!("\r\n");

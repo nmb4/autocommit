@@ -315,18 +315,23 @@ impl ActionPrompt {
             let sep = Span::styled(" · ", Style::default().dim());
             let dim = Style::default().dim();
             let w = Style::default().fg(Color::White);
+            let can_add_note = self.state.selected_idx == Some(RETRY);
 
             let spans: Vec<Span> = match self.focus {
-                Focus::Options => vec![
-                    Span::styled("tab", w),
-                    Span::styled(" add note", dim),
-                    sep.clone(),
-                    Span::styled("enter", w),
-                    Span::styled(" confirm", dim),
-                    sep.clone(),
-                    Span::styled("esc", w),
-                    Span::styled(" abort", dim),
-                ],
+                Focus::Options => {
+                    let mut hints = Vec::new();
+                    if can_add_note {
+                        hints.push(Span::styled("tab", w));
+                        hints.push(Span::styled(" add note", dim));
+                        hints.push(sep.clone());
+                    }
+                    hints.push(Span::styled("enter", w));
+                    hints.push(Span::styled(" confirm", dim));
+                    hints.push(sep.clone());
+                    hints.push(Span::styled("esc", w));
+                    hints.push(Span::styled(" abort", dim));
+                    hints
+                }
                 Focus::Note => vec![
                     Span::styled("tab/esc", w),
                     Span::styled(" close note", dim),
