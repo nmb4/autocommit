@@ -187,7 +187,12 @@ impl ApiClient {
         }
 
         let json: Value = resp.json().await.context("Failed to parse API response")?;
-        extract_text_from_chat_response(&json).context("Empty textual response from API")
+        extract_text_from_chat_response(&json).ok_or_else(|| {
+            let snippet = serde_json::to_string(&json)
+                .map(|s| truncate_for_error(&s, 800))
+                .unwrap_or_else(|_| "<unprintable json>".to_string());
+            anyhow::anyhow!("Empty textual response from API. Response snippet: {}", snippet)
+        })
     }
 }
 
@@ -210,6 +215,60 @@ fn extract_text_from_chat_response(json: &Value) -> Option<String> {
         }
     }
 
+    if let Some(refusal) = choice0
+        .get("message")
+        .and_then(|m| m.get("refusal"))
+        .and_then(Value::as_str)
+    {
+        if !refusal.trim().is_empty() {
+            return Some(refusal.to_string());
+        }
+    }
+
+    if let Some(reasoning) = choice0
+        .get("message")
+        .and_then(|m| m.get("reasoning"))
+        .and_then(Value::as_str)
+    {
+        if !reasoning.trim().is_empty() {
+            return Some(reasoning.to_string());
+        }
+    }
+
+    if let Some(args) = choice0
+        .get("message")
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(Value::as_array)
+        .and_then(|calls| calls.first())
+        .and_then(|call| call.get("function"))
+        .and_then(|f| f.get("arguments"))
+        .and_then(Value::as_str)
+    {
+        if !args.trim().is_empty() {
+            return Some(args.to_string());
+        }
+    }
+
+    if let Some(output_text) = json
+        .get("output")
+        .and_then(Value::as_array)
+        .and_then(|arr| arr.first())
+        .and_then(|item| item.get("content"))
+        .and_then(extract_text_from_content_value)
+    {
+        if !output_text.trim().is_empty() {
+            return Some(output_text);
+        }
+    }
+
+    if let Some(msg) = choice0.get("message") {
+        if let Some(fallback) = collect_text_fragments(msg) {
+            if !fallback.trim().is_empty() {
+                return Some(fallback);
+            }
+        }
+    }
+
     None
 }
 
@@ -221,10 +280,9 @@ fn extract_text_from_content_value(v: &Value) -> Option<String> {
             for part in parts {
                 if let Some(t) = part.get("text").and_then(Value::as_str) {
                     out.push_str(t);
-                } else if let Some(t) = part
-                    .get("content")
-                    .and_then(Value::as_str)
-                {
+                } else if let Some(t) = part.get("content").and_then(Value::as_str) {
+                    out.push_str(t);
+                } else if let Some(t) = part.get("output_text").and_then(Value::as_str) {
                     out.push_str(t);
                 }
             }
@@ -232,6 +290,51 @@ fn extract_text_from_content_value(v: &Value) -> Option<String> {
         }
         _ => None,
     }
+}
+
+fn collect_text_fragments(v: &Value) -> Option<String> {
+    let mut out = String::new();
+    collect_text_fragments_into(v, &mut out);
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn collect_text_fragments_into(v: &Value, out: &mut String) {
+    match v {
+        Value::String(s) => {
+            if !s.trim().is_empty() {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(s);
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr {
+                collect_text_fragments_into(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for (k, val) in map {
+                if matches!(k.as_str(), "text" | "content" | "output_text" | "reasoning" | "refusal")
+                {
+                    collect_text_fragments_into(val, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn truncate_for_error(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max_chars).collect();
+    format!("{}… [truncated]", head)
 }
 
 const BASE_SYSTEM_PROMPT: &str = r#"
