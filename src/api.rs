@@ -2,8 +2,32 @@ use anyhow::{Context, Result};
 use crate::conventions::CommitConventions;
 use serde::{Deserialize, Serialize};
 
-const BASE_URL: &str = "https://api.inceptionlabs.ai/v1";
-const MODEL: &str = "mercury-2";
+const INCEPTION_BASE_URL: &str = "https://api.inceptionlabs.ai/v1";
+const INCEPTION_MODEL: &str = "mercury-2";
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const OPENROUTER_MODEL: &str = "tencent/hy3-preview:free";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Provider {
+    Inception,
+    OpenRouter,
+}
+
+impl Provider {
+    fn default_base_url(self) -> &'static str {
+        match self {
+            Provider::Inception => INCEPTION_BASE_URL,
+            Provider::OpenRouter => OPENROUTER_BASE_URL,
+        }
+    }
+
+    fn default_model(self) -> &'static str {
+        match self {
+            Provider::Inception => INCEPTION_MODEL,
+            Provider::OpenRouter => OPENROUTER_MODEL,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -28,6 +52,13 @@ struct ChatRequest {
     temperature: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ReasoningConfig {
+    effort: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,6 +79,7 @@ struct Choice {
 
 pub struct ApiClient {
     client: reqwest::Client,
+    provider: Provider,
     api_key: String,
     base_url: String,
     model: String,
@@ -62,13 +94,28 @@ pub struct GenerationOptions {
 }
 
 impl ApiClient {
-    pub fn new(api_key: String, base_url: Option<String>, model: Option<String>) -> Self {
-        ApiClient {
+    pub fn new(
+        provider: Provider,
+        inception_api_key: Option<String>,
+        openrouter_api_key: Option<String>,
+        base_url: Option<String>,
+        model: Option<String>,
+    ) -> Result<Self> {
+        let api_key = match provider {
+            Provider::Inception => inception_api_key
+                .context("Missing Inception API key (set INCEPTION_API_KEY or pass --api-key)")?,
+            Provider::OpenRouter => openrouter_api_key
+                .context("Missing OpenRouter API key (set AC_OR_KEY or pass --or-key)")?,
+        };
+
+        Ok(ApiClient {
             client: reqwest::Client::new(),
+            provider,
             api_key,
-            base_url: base_url.unwrap_or_else(|| BASE_URL.to_string()),
-            model: model.unwrap_or_else(|| MODEL.to_string()),
-        }
+            base_url: base_url
+                .unwrap_or_else(|| provider.default_base_url().to_string()),
+            model: model.unwrap_or_else(|| provider.default_model().to_string()),
+        })
     }
 
     pub async fn generate_commits(
@@ -97,10 +144,20 @@ impl ApiClient {
             }
         }
 
-        let reason_effort_str = match options.reasoning_effort {
+        let effort = match options.reasoning_effort {
             ReasoningEffort::Instant => None,
-            ReasoningEffort::Low => Some("low".to_string()),
-            ReasoningEffort::High => Some("high".to_string()),
+            ReasoningEffort::Low => Some("low"),
+            ReasoningEffort::High => Some("high"),
+        };
+
+        let (reasoning_effort, reasoning) = match self.provider {
+            Provider::Inception => (effort.map(str::to_string), None),
+            Provider::OpenRouter => (
+                None,
+                effort.map(|e| ReasoningConfig {
+                    effort: e.to_string(),
+                }),
+            ),
         };
 
         let request = ChatRequest {
@@ -117,7 +174,8 @@ impl ApiClient {
             ],
             max_tokens: 2048,
             temperature: 0.2,
-            reasoning_effort: reason_effort_str,
+            reasoning_effort,
+            reasoning,
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -129,7 +187,7 @@ impl ApiClient {
             .json(&request)
             .send()
             .await
-            .context("Failed to send request to Inception API")?;
+            .context("Failed to send request to provider API")?;
 
         if !resp.status().is_success() {
             let status = resp.status();

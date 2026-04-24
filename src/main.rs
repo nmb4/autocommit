@@ -25,6 +25,38 @@ enum ReasoningEffortArg {
     High,
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+enum ProviderArg {
+    Auto,
+    Inception,
+    Openrouter,
+}
+
+impl ProviderArg {
+    fn resolve(
+        self,
+        has_inception_key: bool,
+        has_openrouter_key: bool,
+    ) -> Result<api::Provider> {
+        match self {
+            ProviderArg::Inception => Ok(api::Provider::Inception),
+            ProviderArg::Openrouter => Ok(api::Provider::OpenRouter),
+            ProviderArg::Auto => {
+                if has_inception_key {
+                    Ok(api::Provider::Inception)
+                } else if has_openrouter_key {
+                    Ok(api::Provider::OpenRouter)
+                } else {
+                    anyhow::bail!(
+                        "No API key found. Set INCEPTION_API_KEY or AC_OR_KEY, or pass --api-key/--or-key."
+                    )
+                }
+            }
+        }
+    }
+}
+
 impl From<ReasoningEffortArg> for api::ReasoningEffort {
     fn from(arg: ReasoningEffortArg) -> Self {
         match arg {
@@ -57,13 +89,13 @@ impl ReasoningEffortArg {
 /// autocommit — AI-powered git commit message generator
 ///
 /// Analyzes your repository's staged and unstaged changes, then uses the
-/// Mercury model via Inception Labs to generate meaningful, conventional
+/// configured provider/model to generate meaningful, conventional
 /// commit messages. Shows you the plan and asks for confirmation before
 /// executing anything.
 #[derive(Debug, Parser)]
 #[command(
     name = "autocommit",
-    about = "AI-powered git commits using Mercury via Inception Labs",
+    about = "AI-powered git commits using Inception or OpenRouter models",
     long_about = None,
     version
 )]
@@ -72,15 +104,23 @@ struct Args {
     #[arg(short, long, default_value = ".")]
     path: String,
 
+    /// API provider: auto (default), inception, or openrouter
+    #[arg(long, value_enum, default_value = "auto")]
+    provider: ProviderArg,
+
     /// Inception Labs API key (or set INCEPTION_API_KEY env var)
-    #[arg(long, env = "INCEPTION_API_KEY", hide_env_values = true)]
-    api_key: String,
+    #[arg(long = "api-key", env = "INCEPTION_API_KEY", hide_env_values = true)]
+    inception_api_key: Option<String>,
+
+    /// OpenRouter API key (or set AC_OR_KEY env var)
+    #[arg(long = "or-key", env = "AC_OR_KEY", hide_env_values = true)]
+    openrouter_api_key: Option<String>,
 
     /// Override the API base URL
     #[arg(long, env = "INCEPTION_BASE_URL")]
     base_url: Option<String>,
 
-    /// Override the model name (default: mercury-coder)
+    /// Override the model name (default depends on provider)
     #[arg(long, env = "AUTOCOMMIT_MODEL")]
     model: Option<String>,
 
@@ -156,11 +196,17 @@ async fn run() -> Result<()> {
     }
 
     // ── 2. Call the model ────────────────────────────────────────────────────
+    let provider = args.provider.resolve(
+        args.inception_api_key.is_some(),
+        args.openrouter_api_key.is_some(),
+    )?;
     let client = api::ApiClient::new(
-        args.api_key.clone(),
+        provider,
+        args.inception_api_key.clone(),
+        args.openrouter_api_key.clone(),
         args.base_url.clone(),
         args.model.clone(),
-    );
+    )?;
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
     let raw_output = generate_plan(
         &client,
