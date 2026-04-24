@@ -2,14 +2,16 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
-use ratatui::widgets::Paragraph;
+use ratatui::text::Span;
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthStr;
 
 use crate::scroll_state::ScrollState;
-use crate::selection_rendering::{self, GenericDisplayRow, render_menu_surface, measure_rows_height, menu_surface_inset, menu_surface_padding_height};
+use crate::selection_rendering::{render_menu_surface, menu_surface_inset, menu_surface_padding_height};
 
 /// An option in a question.
 #[derive(Clone)]
@@ -59,10 +61,8 @@ struct AnswerState {
     committed: bool,
 }
 
-const NOTES_PLACEHOLDER: &str = "Add notes";
 const ANSWER_PLACEHOLDER: &str = "Type your answer";
 const OTHER_LABEL: &str = "None of the above";
-const OTHER_DESC: &str = "Optionally, add details in notes (tab).";
 
 /// A multi-question prompt with option selection + notes.
 pub struct QuestionsPrompt {
@@ -348,45 +348,6 @@ impl QuestionsPrompt {
         }
     }
 
-    fn option_rows(&self) -> Vec<GenericDisplayRow> {
-        let Some(q) = self.current_question() else { return vec![] };
-        let selected_idx = self.current_answer().and_then(|a| a.options_state.selected_idx);
-        let mut rows: Vec<GenericDisplayRow> = q
-            .options
-            .iter()
-            .enumerate()
-            .map(|(idx, opt)| {
-                let selected = selected_idx.is_some_and(|s| s == idx);
-                let prefix = if selected { '›' } else { ' ' };
-                let n = idx + 1;
-                let prefix_label = format!("{prefix} {n}. ");
-                let wrap_indent = UnicodeWidthStr::width(prefix_label.as_str());
-                GenericDisplayRow {
-                    name: format!("{prefix_label}{}", opt.label),
-                    description: Some(opt.description.clone()),
-                    wrap_indent: Some(wrap_indent),
-                    ..Default::default()
-                }
-            })
-            .collect();
-
-        if q.is_other && !q.options.is_empty() {
-            let idx = q.options.len();
-            let selected = selected_idx.is_some_and(|s| s == idx);
-            let prefix = if selected { '›' } else { ' ' };
-            let n = idx + 1;
-            let prefix_label = format!("{prefix} {n}. ");
-            let wrap_indent = UnicodeWidthStr::width(prefix_label.as_str());
-            rows.push(GenericDisplayRow {
-                name: format!("{prefix_label}{OTHER_LABEL}"),
-                description: Some(OTHER_DESC.to_string()),
-                wrap_indent: Some(wrap_indent),
-                ..Default::default()
-            });
-        }
-        rows
-    }
-
     pub fn desired_height(&self, width: u16) -> u16 {
         let outer = Rect::new(0, 0, width, u16::MAX);
         let inner = menu_surface_inset(outer);
@@ -399,15 +360,13 @@ impl QuestionsPrompt {
             .unwrap_or(0) as u16;
 
         let options_height = if has_options {
-            let rows = self.option_rows();
-            let mut st = self.current_answer().map(|a| a.options_state).unwrap_or_default();
-            if st.selected_idx.is_none() { st.selected_idx = Some(0); }
-            measure_rows_height(&rows, &st, rows.len().max(1), inner_width.max(1))
+            self.options_len() as u16
         } else {
             0
         };
 
-        let notes_height = if self.notes_ui_visible() { 3u16 } else { 0 };
+        // For freeform (no options), notes take 1 line inline
+        let notes_height = if !has_options || self.notes_ui_visible() { 1u16 } else { 0 };
         let footer_height: u16 = 1;
         let padding = menu_surface_padding_height();
 
@@ -426,6 +385,7 @@ impl QuestionsPrompt {
         let q = self.current_question();
         let question_count = self.questions.len();
         let current_idx = self.current_idx;
+        let selected_idx = self.current_answer().and_then(|a| a.options_state.selected_idx);
 
         // Progress line
         let progress = if question_count > 0 {
@@ -453,50 +413,118 @@ impl QuestionsPrompt {
             }
         }
 
-        // Options
-        if self.has_options() {
-            y += 1; // spacer
-            let rows = self.option_rows();
-            let options_state = self.current_answer()
-                .map(|a| a.options_state)
-                .unwrap_or_default();
-            let rows_height = measure_rows_height(
-                &rows,
-                &options_state,
-                rows.len().max(1),
-                content_area.width,
-            );
-            let rows_area = Rect { x: content_area.x, y, width: content_area.width, height: rows_height.min(content_area.y + content_area.height - y) };
-            selection_rendering::render_rows(
-                rows_area,
-                buf,
-                &rows,
-                &options_state,
-                rows.len().max(1),
-                "No options",
-            );
-            y += rows_area.height;
-        }
+        // Spacer
+        y += 1;
 
-        // Notes input
-        if self.notes_ui_visible() && y + 3 < content_area.y + content_area.height {
-            y += 1;
-            let notes_area = Rect { x: content_area.x, y, width: content_area.width, height: 3 };
-            let placeholder = if self.has_options() { NOTES_PLACEHOLDER } else { ANSWER_PLACEHOLDER };
-            let display = if self.notes_draft.is_empty() {
-                Line::from(placeholder.dim())
-            } else {
-                Line::from(self.notes_draft.as_str())
-            };
-            Paragraph::new(display).render(notes_area, buf);
-            y += 3;
+        if self.has_options() {
+            // Render each option as a single line with inline notes for the selected one
+            let Some(q_ref) = self.current_question() else { return };
+            let total_options = self.options_len();
+            for idx in 0..total_options {
+                if y >= content_area.y + content_area.height { return; }
+
+                let is_selected = selected_idx == Some(idx);
+                let prefix = if is_selected { '›' } else { ' ' };
+                let n = idx + 1;
+
+                // Get label
+                let label = if idx < q_ref.options.len() {
+                    q_ref.options[idx].label.clone()
+                } else if idx == q_ref.options.len() && q_ref.is_other {
+                    OTHER_LABEL.to_string()
+                } else {
+                    continue;
+                };
+
+                let style = if is_selected {
+                    Style::default().fg(Color::Cyan).bold()
+                } else {
+                    Style::default()
+                };
+
+                let row_text = format!("{prefix} {n}. {label}");
+                let row_width = UnicodeWidthStr::width(row_text.as_str()) as u16;
+
+                // Render the option label
+                Span::styled(row_text.clone(), style).render(
+                    Rect { x: content_area.x, y, width: row_width.min(content_area.width), height: 1 },
+                    buf,
+                );
+
+                // Inline notes: if this is the selected option and we have notes focus
+                if is_selected && self.focus == Focus::Notes {
+                    let remaining = content_area.width.saturating_sub(row_width).saturating_sub(3);
+                    if remaining > 0 {
+                        let cursor_char = if self.should_show_cursor() { "▌" } else { "│" };
+                        let notes_preview: String = if self.notes_draft.is_empty() {
+                            format!(" {cursor_char}")
+                        } else {
+                            // Truncate notes to fit
+                            let max_notes = remaining.saturating_sub(1) as usize;
+                            let truncated: String = self.notes_draft.chars().take(max_notes).collect();
+                            format!(" {truncated}{cursor_char}")
+                        };
+                        Span::styled(notes_preview, Style::default().fg(Color::Yellow)).render(
+                            Rect {
+                                x: content_area.x + row_width.min(content_area.width),
+                                y,
+                                width: content_area.width.saturating_sub(row_width.min(content_area.width)),
+                                height: 1,
+                            },
+                            buf,
+                        );
+                    }
+                } else if is_selected && self.notes_ui_visible() && !self.notes_draft.is_empty() {
+                    // Show existing notes (dimmed) when not in notes focus
+                    let remaining = content_area.width.saturating_sub(row_width).saturating_sub(3);
+                    if remaining > 0 {
+                        let max_notes = remaining.saturating_sub(1) as usize;
+                        let truncated: String = self.notes_draft.chars().take(max_notes).collect();
+                        Span::styled(format!(" {truncated}"), Style::default().dim()).render(
+                            Rect {
+                                x: content_area.x + row_width.min(content_area.width),
+                                y,
+                                width: content_area.width.saturating_sub(row_width.min(content_area.width)),
+                                height: 1,
+                            },
+                            buf,
+                        );
+                    }
+                }
+
+                y += 1;
+            }
+        } else {
+            // Freeform: notes input on a single line with cursor
+            if y < content_area.y + content_area.height {
+                let cursor_char = if self.should_show_cursor() { "▌" } else { "│" };
+                let display = if self.notes_draft.is_empty() {
+                    Line::from(vec![
+                        ANSWER_PLACEHOLDER.dim(),
+                        Span::styled(cursor_char, Style::default().fg(Color::Yellow)),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::raw(self.notes_draft.clone()),
+                        Span::styled(cursor_char, Style::default().fg(Color::Yellow)),
+                    ])
+                };
+                display.render(
+                    Rect { x: content_area.x, y, width: content_area.width, height: 1 },
+                    buf,
+                );
+                y += 1;
+            }
         }
 
         // Footer hints
         if y < content_area.y + content_area.height {
             let mut hints = Vec::new();
             if self.has_options() && self.focus == Focus::Options {
-                hints.push("tab to add notes");
+                hints.push("tab to edit notes");
+            }
+            if self.has_options() && self.focus == Focus::Notes {
+                hints.push("tab/esc to close notes");
             }
             let is_last = self.current_idx + 1 >= self.questions.len();
             if is_last {
@@ -513,5 +541,15 @@ impl QuestionsPrompt {
                 buf,
             );
         }
+    }
+
+    fn should_show_cursor(&self) -> bool {
+        // Blink the cursor: visible for 500ms, hidden for 500ms
+        use std::time::SystemTime;
+        let millis = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        (millis % 1000) < 500
     }
 }

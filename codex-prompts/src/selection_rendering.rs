@@ -5,7 +5,6 @@ use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
-use ratatui::widgets::Block;
 use ratatui::widgets::Widget;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
@@ -38,13 +37,11 @@ pub(crate) fn menu_surface_padding_height() -> u16 {
     MENU_SURFACE_INSET_V * 2
 }
 
-pub fn render_menu_surface(area: Rect, buf: &mut Buffer) -> Rect {
+pub fn render_menu_surface(area: Rect, _buf: &mut Buffer) -> Rect {
     if area.is_empty() {
         return area;
     }
-    Block::default()
-        .style(Style::default().bg(Color::DarkGray))
-        .render(area, buf);
+    // No background fill — just use the terminal's own background.
     menu_surface_inset(area)
 }
 
