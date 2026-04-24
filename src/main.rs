@@ -219,11 +219,13 @@ async fn review_and_execute_plan(
             }
             ParseResult::Steps(steps) => match execute_or_retry(args, &steps, ctx, long_commits)? {
                 PlanAction::Execute => return Ok(()),
-                PlanAction::Retry => {}
+                PlanAction::Retry => {
+                    println!("{} Retrying with the current commit mode.", "●".cyan());
+                }
                 PlanAction::ToggleLongCommits => {
                     long_commits = !long_commits;
                     println!(
-                        "{} Using {} commit mode for next generation.",
+                        "{} Switching to {} commit mode and retrying.",
                         "●".cyan(),
                         if long_commits { "long" } else { "short" }
                     );
@@ -301,6 +303,7 @@ fn execute_or_retry(
         commit_count,
         if commit_count == 1 { "" } else { "s" }
     );
+    println!();
 
     for (i, step) in steps.iter().enumerate() {
         let num = format!("[{}/{}]", i + 1, steps.len()).dimmed();
@@ -311,7 +314,7 @@ fn execute_or_retry(
                 println!("      {}", cmd.raw.dimmed());
             }
             ExecutionStep::CommitGroup(group) => {
-                println!("  {} {} Commit:", num, "📦".green().bold());
+                println!("  {} Commit:", num);
                 println!("      {}", group.message.green().bold());
                 if let Some(ref body) = group.body {
                     for line in body.lines().take(5) {
@@ -324,7 +327,10 @@ fn execute_or_retry(
                     }
                 }
                 for cmd in &group.add_commands {
-                    println!("      {}", cmd.raw.dimmed());
+                    match &cmd.kind {
+                        parser::CommandKind::Add { .. } => println!("      {}", "git add …".dimmed()),
+                        _ => println!("      {}", cmd.raw.dimmed()),
+                    }
                 }
                 for file in &group.files {
                     println!("      {} {}", "+".cyan(), file.dimmed());
@@ -336,6 +342,7 @@ fn execute_or_retry(
             println!();
         }
     }
+    println!();
 
     // ── Confirm ──────────────────────────────────────────────────────────────
     if !args.yes {
