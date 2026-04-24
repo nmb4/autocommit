@@ -380,7 +380,10 @@ git commit -m "docs: update README with auth setup instructions"
 If there is nothing to commit (no staged or unstaged changes, no untracked files), output:
 ```shell
 # nothing to commit
+# reason: <one concise sentence explaining why there is nothing to commit>
 ```
+
+If you choose "nothing to commit", the reason line is REQUIRED.
 "#;
 
 impl ApiClient {

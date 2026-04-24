@@ -57,14 +57,16 @@ pub fn parse_commands(output: &str) -> Result<ParseResult> {
             .iter()
             .all(|c| matches!(c.kind, CommandKind::Comment | CommandKind::Other))
     {
-        return Ok(ParseResult::NothingToCommit);
+        return Ok(ParseResult::NothingToCommit {
+            reason: extract_nothing_to_commit_reason(&commands),
+        });
     }
 
     // Group into execution steps (resets + commit groups)
     let steps = group_into_steps(&commands)?;
 
     if steps.is_empty() {
-        return Ok(ParseResult::NothingToCommit);
+        return Ok(ParseResult::NothingToCommit { reason: None });
     }
 
     Ok(ParseResult::Steps(steps))
@@ -72,7 +74,42 @@ pub fn parse_commands(output: &str) -> Result<ParseResult> {
 
 pub enum ParseResult {
     Steps(Vec<ExecutionStep>),
-    NothingToCommit,
+    NothingToCommit { reason: Option<String> },
+}
+
+fn extract_nothing_to_commit_reason(commands: &[GitCommand]) -> Option<String> {
+    let mut lines = Vec::new();
+
+    for cmd in commands {
+        let raw = cmd.raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+
+        let normalized = raw.trim_start_matches('#').trim().to_lowercase();
+        if normalized == "nothing to commit" || normalized.starts_with("nothing to commit:") {
+            continue;
+        }
+
+        match cmd.kind {
+            CommandKind::Comment => {
+                let text = raw.trim_start_matches('#').trim();
+                if !text.is_empty() {
+                    lines.push(text.to_string());
+                }
+            }
+            CommandKind::Other => {
+                lines.push(raw.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join(" "))
+    }
 }
 
 fn extract_shell_block(text: &str) -> Option<&str> {

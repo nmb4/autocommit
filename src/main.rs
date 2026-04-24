@@ -267,11 +267,14 @@ async fn review_and_execute_plan(
             .context("Failed to parse model output into git commands")?;
 
         match parsed {
-            ParseResult::NothingToCommit => {
+            ParseResult::NothingToCommit { reason } => {
                 println!(
                     "{} The model determined there is nothing meaningful to commit.",
                     "○".yellow()
                 );
+                if let Some(reason) = reason {
+                    println!("  {} {}", "Reason:".dimmed(), reason);
+                }
                 return Ok(());
             }
             ParseResult::Steps(steps) => match execute_or_retry(args, &steps, ctx, long_commits)? {
