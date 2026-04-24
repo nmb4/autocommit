@@ -317,7 +317,7 @@ fn execute_or_retry(
                 println!("  {} Commit:", num);
                 println!("      {}", group.message.green().bold());
                 if let Some(ref body) = group.body {
-                    for line in body.lines().take(5) {
+                    for line in body.lines().filter(|line| !line.trim().is_empty()).take(5) {
                         println!("      {}", line.dimmed());
                     }
                 }
@@ -403,7 +403,7 @@ fn execute_or_retry(
                         label.dimmed(),
                         group.message.bold()
                     );
-                    for line in body.lines().take(3) {
+                    for line in body.lines().filter(|line| !line.trim().is_empty()).take(3) {
                         println!("      {}", line.dimmed());
                     }
                 } else {
