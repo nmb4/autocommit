@@ -1,4 +1,5 @@
 /target
+**/target/
 .sendme-send-*
 .commit-conventions.md
 /.DS_Store
