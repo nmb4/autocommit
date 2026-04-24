@@ -12,6 +12,7 @@ use std::io;
 
 use codex_prompts::approve::ApproveResult;
 use codex_prompts::questions::QuestionsResult;
+use codex_prompts::retry::RetryResult;
 use codex_prompts::select::SelectResult;
 use codex_prompts::*;
 
@@ -30,6 +31,8 @@ enum Commands {
     Approve,
     /// Show a multi-question prompt with options + notes
     Questions,
+    /// Show a generation review prompt (accept/retry+note/abort)
+    Retry,
 }
 
 fn main() -> Result<()> {
@@ -38,6 +41,7 @@ fn main() -> Result<()> {
         Commands::Select => run_select(),
         Commands::Approve => run_approve(),
         Commands::Questions => run_questions(),
+        Commands::Retry => run_retry(),
     }
 }
 
@@ -181,6 +185,43 @@ fn run_questions() -> Result<()> {
     Ok(())
 }
 
+fn run_retry() -> Result<()> {
+    let mut terminal = setup_terminal()?;
+
+    let detail_lines = vec![
+        "feat(cli): add retry prompt for generation review".to_string(),
+        "".to_string(),
+        "This adds a new RetryPrompt type that mirrors the autocommit".to_string(),
+        "approval flow: Accept / Retry (default, with optional focus".to_string(),
+        "note via tab) / Abort.".to_string(),
+        "".to_string(),
+        "  codex-prompts/src/retry.rs  | 85 ++++++++++".to_string(),
+        "  codex-prompts/src/main.rs   | 42 +++++".to_string(),
+        "  2 files changed, 127 insertions(+)".to_string(),
+    ];
+
+    let mut prompt = RetryPrompt::new(
+        "Proposed commit message".to_string(),
+        detail_lines,
+    );
+
+    let result = run_retry_loop(&mut terminal, &mut prompt);
+    restore_terminal()?;
+
+    match result {
+        RetryResult::Accept => println!("Accepted"),
+        RetryResult::Retry { note } => {
+            if note.is_empty() {
+                println!("Retry (no note)");
+            } else {
+                println!("Retry with note: {note:?}");
+            }
+        }
+        RetryResult::Abort => println!("Aborted"),
+    }
+    Ok(())
+}
+
 fn run_prompt_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     prompt: &mut SelectPrompt,
@@ -276,6 +317,40 @@ fn run_questions_loop(
                     prompt.handle_key(key);
                     if prompt.is_done() {
                         return prompt.result().cloned().unwrap_or(QuestionsResult::Cancelled);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn run_retry_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    prompt: &mut RetryPrompt,
+) -> RetryResult {
+    loop {
+        let size = terminal.size().unwrap_or_else(|_| Size::new(80, 24));
+        let height = prompt.desired_height(size.width);
+        let area = Rect::new(
+            0,
+            size.height.saturating_sub(height),
+            size.width,
+            height.min(size.height),
+        );
+
+        terminal
+            .draw(|f| {
+                let mut buf = f.buffer_mut();
+                prompt.render(area, &mut buf);
+            })
+            .ok();
+
+        if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = event::read() {
+                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+                    prompt.handle_key(key);
+                    if prompt.is_done() {
+                        return prompt.result().cloned().unwrap_or(RetryResult::Abort);
                     }
                 }
             }
