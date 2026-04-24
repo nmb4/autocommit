@@ -58,6 +58,7 @@ pub struct GenerationOptions {
     pub reasoning_effort: ReasoningEffort,
     pub retry_attempt: usize,
     pub previous_output: Option<String>,
+    pub long_commits: bool,
 }
 
 impl ApiClient {
@@ -76,7 +77,7 @@ impl ApiClient {
         options: &GenerationOptions,
         conventions: Option<&CommitConventions>,
     ) -> Result<String> {
-        let system_prompt = Self::build_system_prompt(conventions);
+        let system_prompt = Self::build_system_prompt(conventions, options.long_commits);
 
         let mut user_message = format!(
             "Here is the current git repository state:\n\n{}\n\nPlease analyze this and generate the appropriate git commands.",
@@ -193,8 +194,20 @@ If there is nothing to commit (no staged or unstaged changes, no untracked files
 "#;
 
 impl ApiClient {
-    fn build_system_prompt(conventions: Option<&CommitConventions>) -> String {
+    fn build_system_prompt(conventions: Option<&CommitConventions>, long_commits: bool) -> String {
         let mut prompt = BASE_SYSTEM_PROMPT.trim().to_string();
+
+        if long_commits {
+            prompt.push_str("\n\n");
+            prompt.push_str("LONG COMMIT MESSAGES:\n");
+            prompt.push_str("Each commit message MUST have a body (multiline). Format:\n");
+            prompt.push_str("```\n");
+            prompt.push_str("git commit -m \"type(scope): short summary\" -m \"Detailed explanation of the change, including:\n");
+            prompt.push_str("- What changed and why\n");
+            prompt.push_str("- Any context a future reader would need\n");
+            prompt.push_str("- Breaking changes or migration notes if applicable\"\n");
+            prompt.push_str("```\n");
+        }
 
         if let Some(conv) = conventions {
             let conventions_text = conv.to_prompt_fragment();

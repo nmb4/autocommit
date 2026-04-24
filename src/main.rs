@@ -86,6 +86,10 @@ struct Args {
     #[arg(short = 'r', long, value_enum, default_value = "auto")]
     reasoning: ReasoningEffortArg,
 
+    /// Use long (multiline) commit messages with a body explaining the change
+    #[arg(short = 'l', long)]
+    long: bool,
+
     /// Skip confirmation prompt and execute immediately
     #[arg(short = 'y', long)]
     yes: bool,
@@ -159,7 +163,7 @@ async fn run() -> Result<()> {
         args.model.clone(),
     );
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
-    let raw_output = generate_plan(&client, &prompt, reasoning_effort, 0, None, conventions.as_ref()).await?;
+    let raw_output = generate_plan(&client, &prompt, reasoning_effort, 0, None, conventions.as_ref(), args.long).await?;
 
     if args.dry_run {
         println!("{}", "── Raw model output ──".dimmed());
@@ -175,6 +179,7 @@ async fn run() -> Result<()> {
         reasoning_effort,
         raw_output,
         conventions.as_ref(),
+        args.long,
     )
     .await
 }
@@ -187,6 +192,7 @@ async fn review_and_execute_plan(
     reasoning_effort: api::ReasoningEffort,
     mut raw_output: String,
     conventions: Option<&conventions::CommitConventions>,
+    mut long_commits: bool,
 ) -> Result<()> {
     let mut retry_attempt = 0;
 
@@ -203,8 +209,21 @@ async fn review_and_execute_plan(
                 return Ok(());
             }
             ParseResult::Steps(steps) => {
-                if execute_or_retry(args, &steps, ctx)? {
-                    return Ok(());
+                match execute_or_retry(args, &steps, ctx, long_commits)? {
+                    PlanAction::Execute => return Ok(()),
+                    PlanAction::Retry => {}
+                    PlanAction::Abort => {
+                        println!("{} Aborted.", "✗".red());
+                        return Ok(());
+                    }
+                    PlanAction::ToggleLong => {
+                        long_commits = !long_commits;
+                        println!(
+                            "  {} Long commits {}",
+                            if long_commits { "✓" } else { "✗" }.cyan(),
+                            if long_commits { "enabled" } else { "disabled" }.cyan()
+                        );
+                    }
                 }
             }
         }
@@ -217,6 +236,7 @@ async fn review_and_execute_plan(
             retry_attempt,
             Some(raw_output.as_str()),
             conventions,
+            long_commits,
         )
         .await?;
     }
@@ -229,6 +249,7 @@ async fn generate_plan(
     retry_attempt: usize,
     previous_output: Option<&str>,
     conventions: Option<&conventions::CommitConventions>,
+    long_commits: bool,
 ) -> Result<String> {
     let message = if retry_attempt == 0 {
         "Asking Mercury to analyze your changes..."
@@ -243,6 +264,7 @@ async fn generate_plan(
                 reasoning_effort,
                 retry_attempt,
                 previous_output: previous_output.map(str::to_owned),
+                long_commits,
             },
             conventions,
         )
@@ -251,7 +273,7 @@ async fn generate_plan(
     result
 }
 
-fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext) -> Result<bool> {
+fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext, long_commits: bool) -> Result<PlanAction> {
     let repo_root = &ctx.repo_root;
     let commit_count = steps
         .iter()
@@ -281,6 +303,11 @@ fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext)
             ExecutionStep::CommitGroup(group) => {
                 println!("  {} {} Commit:", num, "📦".green().bold());
                 println!("      {}", group.message.green().bold());
+                if let Some(ref body) = group.body {
+                    for line in body.lines().take(5) {
+                        println!("      {}", line.dimmed());
+                    }
+                }
                 if !group.hunk_ids.is_empty() {
                     for hunk_id in &group.hunk_ids {
                         println!("      {} {}", "~".cyan(), hunk_id.dimmed());
@@ -300,13 +327,11 @@ fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext)
 
     // ── Confirm ──────────────────────────────────────────────────────────────
     if !args.yes {
-        match prompt_for_plan_action()? {
+        match prompt_for_plan_action(long_commits)? {
             PlanAction::Execute => {}
-            PlanAction::Retry => return Ok(false),
-            PlanAction::Abort => {
-                println!("{} Aborted.", "✗".red());
-                return Ok(true);
-            }
+            PlanAction::Retry => return Ok(PlanAction::Retry),
+            PlanAction::Abort => return Ok(PlanAction::Abort),
+            PlanAction::ToggleLong => return Ok(PlanAction::ToggleLong),
         }
     }
 
@@ -344,14 +369,34 @@ fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext)
                     }
                 }
 
-                run_git_command(repo_root, &["commit", "-m", &group.message], &label)?;
+                if let Some(ref body) = group.body {
+                    run_git_command(
+                        repo_root,
+                        &["commit", "-m", &group.message, "-m", body],
+                        &label,
+                    )?;
+                } else {
+                    run_git_command(repo_root, &["commit", "-m", &group.message], &label)?;
+                }
 
-                println!(
-                    "  {} {} {}",
-                    "✓".green().bold(),
-                    label.dimmed(),
-                    group.message.bold()
-                );
+                if let Some(ref body) = group.body {
+                    println!(
+                        "  {} {} {}",
+                        "✓".green().bold(),
+                        label.dimmed(),
+                        group.message.bold()
+                    );
+                    for line in body.lines().take(3) {
+                        println!("      {}", line.dimmed());
+                    }
+                } else {
+                    println!(
+                        "  {} {} {}",
+                        "✓".green().bold(),
+                        label.dimmed(),
+                        group.message.bold()
+                    );
+                }
             }
         }
     }
@@ -364,7 +409,7 @@ fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext)
         if commit_count == 1 { "" } else { "s" }
     );
 
-    Ok(true)
+    Ok(PlanAction::Execute)
 }
 
 fn run_git_command(repo_root: &str, args: &[&str], label: &str) -> Result<()> {
@@ -436,6 +481,7 @@ enum PlanAction {
     Execute,
     Retry,
     Abort,
+    ToggleLong,
 }
 
 struct RawModeGuard;
@@ -453,10 +499,11 @@ impl Drop for RawModeGuard {
     }
 }
 
-fn prompt_for_plan_action() -> Result<PlanAction> {
+fn prompt_for_plan_action(long_commits: bool) -> Result<PlanAction> {
+    let long_indicator = if long_commits { " [long: ON]" } else { "" };
     print!(
-        "{}",
-        "Press Enter to execute, r to retry, or n to abort: ".cyan()
+        "{}: ",
+        format!("Press Enter to execute, r to retry, l to toggle long commits, or n to abort{}", long_indicator).cyan(),
     );
     io::stdout().flush().context("Failed to flush prompt")?;
 
@@ -471,6 +518,7 @@ fn prompt_for_plan_action() -> Result<PlanAction> {
             let (action, echo) = match key.code {
                 KeyCode::Enter => (PlanAction::Execute, "<enter>"),
                 KeyCode::Char('r') | KeyCode::Char('R') => (PlanAction::Retry, "r"),
+                KeyCode::Char('l') | KeyCode::Char('L') => (PlanAction::ToggleLong, "l"),
                 KeyCode::Char('n') | KeyCode::Char('N') => (PlanAction::Abort, "n"),
                 _ => continue,
             };

@@ -12,7 +12,7 @@ pub enum CommandKind {
     Add { paths: Vec<String> },
     AddHunks { hunk_ids: Vec<String> },
     Reset { paths: Vec<String> },
-    Commit { message: String },
+    Commit { message: String, body: Option<String> },
     Comment,
     Other,
 }
@@ -23,6 +23,7 @@ pub struct CommitGroup {
     pub files: Vec<String>,
     pub hunk_ids: Vec<String>,
     pub message: String,
+    pub body: Option<String>,
     pub add_commands: Vec<GitCommand>,
     pub commit_command: GitCommand,
 }
@@ -146,19 +147,19 @@ fn parse_single_command(line: &str) -> GitCommand {
     }
 
     if let Some(rest) = line.strip_prefix("git commit -m ") {
-        let message = unquote(rest.trim());
+        let (message, body) = extract_commit_messages(rest.trim());
         return GitCommand {
             raw: line.to_string(),
-            kind: CommandKind::Commit { message },
+            kind: CommandKind::Commit { message, body },
         };
     }
 
     // Handle multi-flag variants like: git commit --message "..."  or  git commit -m "..."
     if line.starts_with("git commit") {
-        if let Some(msg) = extract_commit_message(line) {
+        if let Some((msg, body)) = extract_commit_messages_full(line) {
             return GitCommand {
                 raw: line.to_string(),
-                kind: CommandKind::Commit { message: msg },
+                kind: CommandKind::Commit { message: msg, body },
             };
         }
     }
@@ -181,7 +182,7 @@ fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
                 // Flush any pending adds before the reset
                 if !pending_adds.is_empty() {
                     let group =
-                        build_commit_group(&pending_adds, "", &pending_files, &pending_hunk_ids);
+                        build_commit_group(&pending_adds, "", &pending_files, &pending_hunk_ids, None);
                     steps.push(ExecutionStep::CommitGroup(group));
                     pending_adds.clear();
                     pending_files.clear();
@@ -197,7 +198,7 @@ fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
                 pending_adds.push(cmd.clone());
                 pending_hunk_ids.extend(hunk_ids.clone());
             }
-            CommandKind::Commit { message } => {
+            CommandKind::Commit { message, body } => {
                 if pending_adds.is_empty()
                     && pending_files.is_empty()
                     && pending_hunk_ids.is_empty()
@@ -205,9 +206,8 @@ fn group_into_steps(commands: &[GitCommand]) -> Result<Vec<ExecutionStep>> {
                     // Commit without explicit adds — implies "all staged"
                 }
 
-                // Let empty messages through so caller can detect and retry
                 let group =
-                    build_commit_group(&pending_adds, message, &pending_files, &pending_hunk_ids);
+                    build_commit_group(&pending_adds, message, &pending_files, &pending_hunk_ids, body.clone());
                 steps.push(ExecutionStep::CommitGroup(group));
                 pending_adds.clear();
                 pending_files.clear();
@@ -230,11 +230,13 @@ fn build_commit_group(
     message: &str,
     files: &[String],
     hunk_ids: &[String],
+    body: Option<String>,
 ) -> CommitGroup {
     CommitGroup {
         files: files.to_vec(),
         hunk_ids: hunk_ids.to_vec(),
         message: message.to_string(),
+        body,
         add_commands: add_commands.to_vec(),
         commit_command: GitCommand {
             raw: "".to_string(),
@@ -253,14 +255,50 @@ fn unquote(s: &str) -> String {
     }
 }
 
-/// Extract commit message from various `git commit` flag forms
-fn extract_commit_message(line: &str) -> Option<String> {
-    // Try -m "..." or --message "..."
-    for flag in &[" -m ", " --message "] {
-        if let Some(pos) = line.find(flag) {
-            let rest = &line[pos + flag.len()..];
-            return Some(unquote(rest.trim()));
+/// Extract the first message from a `-m "..."` style remainder (handles chained `-m` flags)
+fn extract_commit_messages(rest: &str) -> (String, Option<String>) {
+    // Split on consecutive -m or --message flags
+    let mut parts = Vec::new();
+    let mut current = rest.to_string();
+
+    loop {
+        let trimmed = current.trim();
+        if trimmed.is_empty() {
+            break;
         }
+
+        let (msg, remainder) = if let Some(pos) = trimmed.find(" -m ") {
+            let msg = unquote(trimmed[..pos].trim());
+            let remainder = trimmed[pos + 4..].to_string();
+            (msg, remainder)
+        } else if let Some(pos) = trimmed.find(" --message ") {
+            let msg = unquote(trimmed[..pos].trim());
+            let remainder = trimmed[pos + 11..].to_string();
+            (msg, remainder)
+        } else {
+            (unquote(trimmed), String::new())
+        };
+
+        parts.push(msg);
+        current = remainder;
     }
-    None
+
+    let message = parts.first().cloned().unwrap_or_default();
+    let body = parts.get(1).cloned();
+    (message, body)
+}
+
+/// Extract commit message (and optional body) from a full `git commit` line
+fn extract_commit_messages_full(line: &str) -> Option<(String, Option<String>)> {
+    // Find the first -m or --message flag
+    let flag_pos = [" -m ", " --message "]
+        .iter()
+        .find_map(|f| line.find(f))
+        .map(|pos| {
+            let flag = if line[pos..].starts_with(" --message ") { " --message " } else { " -m " };
+            pos + flag.len()
+        })?;
+
+    let rest = &line[flag_pos..];
+    Some(extract_commit_messages(rest))
 }
