@@ -6,13 +6,15 @@ mod parser;
 use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::terminal::enable_raw_mode;
+use crossterm::terminal::{enable_raw_mode, disable_raw_mode};
 use indicatif::{ProgressBar, ProgressStyle};
 use parser::{ExecutionStep, ParseResult};
+use ratatui::{backend::CrosstermBackend, layout::Rect, layout::Size, Terminal};
 use std::io::{self, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
+
+use codex_prompts::{RetryPrompt, RetryResult};
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
 #[value(rename_all = "lowercase")]
@@ -192,7 +194,7 @@ async fn review_and_execute_plan(
     reasoning_effort: api::ReasoningEffort,
     mut raw_output: String,
     conventions: Option<&conventions::CommitConventions>,
-    mut long_commits: bool,
+    long_commits: bool,
 ) -> Result<()> {
     let mut retry_attempt = 0;
 
@@ -215,14 +217,6 @@ async fn review_and_execute_plan(
                     PlanAction::Abort => {
                         println!("{} Aborted.", "✗".red());
                         return Ok(());
-                    }
-                    PlanAction::ToggleLong => {
-                        long_commits = !long_commits;
-                        println!(
-                            "  {} Long commits {}",
-                            if long_commits { "✓" } else { "✗" }.cyan(),
-                            if long_commits { "enabled" } else { "disabled" }.cyan()
-                        );
                     }
                 }
             }
@@ -331,7 +325,6 @@ fn execute_or_retry(args: &Args, steps: &[ExecutionStep], ctx: &git::GitContext,
             PlanAction::Execute => {}
             PlanAction::Retry => return Ok(PlanAction::Retry),
             PlanAction::Abort => return Ok(PlanAction::Abort),
-            PlanAction::ToggleLong => return Ok(PlanAction::ToggleLong),
         }
     }
 
@@ -481,52 +474,106 @@ enum PlanAction {
     Execute,
     Retry,
     Abort,
-    ToggleLong,
-}
-
-struct RawModeGuard;
-
-impl RawModeGuard {
-    fn new() -> Result<Self> {
-        enable_raw_mode().context("Failed to enable raw input mode")?;
-        Ok(Self)
-    }
-}
-
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = crossterm::terminal::disable_raw_mode();
-    }
 }
 
 fn prompt_for_plan_action(long_commits: bool) -> Result<PlanAction> {
-    let long_indicator = if long_commits { " [long: ON]" } else { "" };
-    print!(
-        "{}: ",
-        format!("Press Enter to execute, r to retry, l to toggle long commits, or n to abort{}", long_indicator).cyan(),
+    // Build detail lines from the current plan (which is shown above the prompt)
+    // We'll show a simple message since the full plan is already displayed
+    let detail_lines = vec![
+        "The full commit plan is shown above.".to_string(),
+        format!("Long commits: {}", if long_commits { "enabled" } else { "disabled" }),
+        "".to_string(),
+        "Enter: Execute plan".to_string(),
+        "r: Retry generation".to_string(),
+        "n: Abort".to_string(),
+    ];
+
+    let mut prompt = RetryPrompt::new(
+        "Commit Plan Ready".to_string(),
+        detail_lines,
     );
-    io::stdout().flush().context("Failed to flush prompt")?;
 
-    let raw_mode = RawModeGuard::new()?;
+    let result = run_retry_prompt(&mut prompt)?;
+
+    match result {
+        RetryResult::Accept => Ok(PlanAction::Execute),
+        RetryResult::Retry { note: _ } => Ok(PlanAction::Retry),
+        RetryResult::Abort => Ok(PlanAction::Abort),
+    }
+}
+
+fn run_retry_prompt(prompt: &mut RetryPrompt) -> Result<RetryResult> {
+    enable_raw_mode()?;
+
+    // Get current cursor position before starting prompt
+    let cursor_pos = crossterm::cursor::position()
+        .unwrap_or((0, 0));
+
+    let backend = CrosstermBackend::new(io::stdout());
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = run_retry_loop(&mut terminal, prompt, cursor_pos.1);
+    disable_raw_mode()?;
+
+    // Clear the prompt area
+    let height = prompt.desired_height(terminal.size()?.width);
+    clear_prompt_area(cursor_pos.1, height)?;
+
+    Ok(result)
+}
+
+fn run_retry_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    prompt: &mut RetryPrompt,
+    start_row: u16,
+) -> RetryResult {
+    use crossterm::event::{self, Event, KeyEventKind};
+
     loop {
-        let event = event::read().context("Prompt failed")?;
-        if let Event::Key(key) = event {
-            if key.kind != KeyEventKind::Press {
-                continue;
+        let size = terminal.size().unwrap_or_else(|_| Size::new(80, 24));
+        let height = prompt.desired_height(size.width);
+        let area = Rect::new(
+            0,
+            start_row,
+            size.width,
+            height.min(size.height.saturating_sub(start_row)),
+        );
+
+        terminal
+            .draw(|f| {
+                let mut buf = f.buffer_mut();
+                prompt.render(area, &mut buf);
+            })
+            .ok();
+
+        if event::poll(std::time::Duration::from_millis(50)).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = event::read() {
+                if key.kind == KeyEventKind::Press || key.kind == KeyEventKind::Repeat {
+                    prompt.handle_key(key);
+                    if prompt.is_done() {
+                        return prompt.result().cloned().unwrap_or(RetryResult::Abort);
+                    }
+                }
             }
-
-            let (action, echo) = match key.code {
-                KeyCode::Enter => (PlanAction::Execute, "<enter>"),
-                KeyCode::Char('r') | KeyCode::Char('R') => (PlanAction::Retry, "r"),
-                KeyCode::Char('l') | KeyCode::Char('L') => (PlanAction::ToggleLong, "l"),
-                KeyCode::Char('n') | KeyCode::Char('N') => (PlanAction::Abort, "n"),
-                _ => continue,
-            };
-
-            drop(raw_mode);
-            println!("{}", echo.dimmed());
-            io::stdout().flush().context("Failed to flush prompt")?;
-            return Ok(action);
         }
     }
+}
+
+fn clear_prompt_area(start_row: u16, height: u16) -> Result<()> {
+    // Move back to the start of the prompt area
+    let mut current_row = start_row.saturating_add(height).saturating_sub(1);
+    let target_row = start_row;
+
+    while current_row > target_row {
+        print!("\x1b[{};H", current_row + 1); // Move to row
+        print!("\x1b[2K"); // Clear line
+        current_row = current_row.saturating_sub(1);
+    }
+
+    // Clear the first line and position cursor there
+    print!("\x1b[{};H", target_row + 1);
+    print!("\x1b[2K");
+    io::stdout().flush()?;
+
+    Ok(())
 }
