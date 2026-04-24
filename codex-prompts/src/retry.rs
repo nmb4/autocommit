@@ -16,11 +16,8 @@ use crate::selection_rendering::{render_menu_surface, menu_surface_padding_heigh
 /// Result of a retry prompt.
 #[derive(Debug, Clone)]
 pub enum RetryResult {
-    /// Accept the current output.
     Accept,
-    /// Retry generation, optionally with a focus note.
     Retry { note: String },
-    /// Abort entirely.
     Abort,
 }
 
@@ -30,8 +27,6 @@ enum Focus {
     Note,
 }
 
-/// An approval prompt tailored for generation review:
-/// Accept / Retry (default, with optional inline note) / Abort.
 pub struct RetryPrompt {
     message: String,
     detail_lines: Vec<String>,
@@ -42,16 +37,14 @@ pub struct RetryPrompt {
     result: Option<RetryResult>,
 }
 
-// Choice indices: 0 = Accept, 1 = Retry, 2 = Abort
 const ACCEPT: usize = 0;
 const RETRY: usize = 1;
-const ABORT: usize = 2;
+const NUM_CHOICES: usize = 3;
 
 impl RetryPrompt {
     pub fn new(message: String, detail_lines: Vec<String>) -> Self {
         let mut state = ScrollState::new();
-        // Default to Retry
-        state.selected_idx = Some(RETRY);
+        state.selected_idx = Some(ACCEPT);
         Self {
             message,
             detail_lines,
@@ -76,80 +69,96 @@ impl RetryPrompt {
             return;
         }
 
-        // Shortcut keys work from any focus
-        if let KeyCode::Char(c) = key.code {
-            match c {
-                'a' => {
-                    self.result = Some(RetryResult::Accept);
-                    self.done = true;
-                    return;
-                }
-                'r' => {
-                    self.result = Some(RetryResult::Retry {
-                        note: self.note_draft.clone(),
-                    });
-                    self.done = true;
-                    return;
-                }
-                'n' | 'q' => {
-                    self.result = Some(RetryResult::Abort);
-                    self.done = true;
-                    return;
-                }
-                _ => {}
-            }
-        }
-
         match self.focus {
-            Focus::Options => match key.code {
-                KeyCode::Up | KeyCode::Char('k') => {
-                    let len = 3;
-                    self.state.move_up_wrap(len);
-                    self.state.ensure_visible(len, len);
-                }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    let len = 3;
-                    self.state.move_down_wrap(len);
-                    self.state.ensure_visible(len, len);
-                }
-                KeyCode::Tab => {
-                    // Open note input on retry row
-                    self.state.selected_idx = Some(RETRY);
-                    self.focus = Focus::Note;
-                }
-                KeyCode::Enter => {
-                    self.submit();
-                }
-                KeyCode::Esc => {
-                    self.result = Some(RetryResult::Abort);
-                    self.done = true;
-                }
-                _ => {}
-            },
-            Focus::Note => match key.code {
-                KeyCode::Tab | KeyCode::Esc => {
-                    self.focus = Focus::Options;
-                }
-                KeyCode::Enter => {
-                    self.submit();
-                }
-                KeyCode::Backspace => {
-                    self.note_draft.pop();
-                }
-                KeyCode::Up | KeyCode::Down => {
-                    // Allow navigating options while in note mode
-                    let len = 3;
-                    match key.code {
-                        KeyCode::Up => self.state.move_up_wrap(len),
-                        KeyCode::Down => self.state.move_down_wrap(len),
-                        _ => {}
+            Focus::Options => {
+                // Shortcuts only active in options mode
+                if let KeyCode::Char(c) = key.code {
+                    match c {
+                        'a' => {
+                            self.result = Some(RetryResult::Accept);
+                            self.done = true;
+                            return;
+                        }
+                        'r' => {
+                            self.result = Some(RetryResult::Retry {
+                                note: self.note_draft.clone(),
+                            });
+                            self.done = true;
+                            return;
+                        }
+                        'n' | 'q' => {
+                            self.result = Some(RetryResult::Abort);
+                            self.done = true;
+                            return;
+                        }
+                        // j/k handled below
+                        'j' | 'k' => {}
+                        _ => return,
                     }
                 }
-                KeyCode::Char(c) => {
-                    self.note_draft.push(c);
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.move_up();
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.move_down();
+                    }
+                    KeyCode::Tab => {
+                        self.state.selected_idx = Some(RETRY);
+                        self.focus = Focus::Note;
+                    }
+                    KeyCode::Enter => {
+                        self.submit();
+                    }
+                    KeyCode::Esc => {
+                        self.result = Some(RetryResult::Abort);
+                        self.done = true;
+                    }
+                    _ => {}
                 }
-                _ => {}
-            },
+            }
+            Focus::Note => {
+                // In note mode, char keys go to the draft — no shortcuts
+                match key.code {
+                    KeyCode::Tab | KeyCode::Esc => {
+                        self.focus = Focus::Options;
+                    }
+                    KeyCode::Enter => {
+                        self.submit();
+                    }
+                    KeyCode::Backspace => {
+                        self.note_draft.pop();
+                    }
+                    KeyCode::Up => {
+                        self.move_up();
+                    }
+                    KeyCode::Down => {
+                        self.move_down();
+                    }
+                    KeyCode::Char(c) => {
+                        self.note_draft.push(c);
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Move up without wrapping — clamp at 0.
+    fn move_up(&mut self) {
+        if let Some(idx) = self.state.selected_idx {
+            if idx > 0 {
+                self.state.selected_idx = Some(idx - 1);
+            }
+        }
+    }
+
+    /// Move down without wrapping — clamp at last item.
+    fn move_down(&mut self) {
+        if let Some(idx) = self.state.selected_idx {
+            if idx + 1 < NUM_CHOICES {
+                self.state.selected_idx = Some(idx + 1);
+            }
         }
     }
 
@@ -162,7 +171,7 @@ impl RetryPrompt {
             Some(RETRY) => {
                 self.result = Some(RetryResult::Retry { note });
             }
-            Some(ABORT) | _ => {
+            _ => {
                 self.result = Some(RetryResult::Abort);
             }
         }
@@ -178,13 +187,14 @@ impl RetryPrompt {
     }
 
     pub fn desired_height(&self, _width: u16) -> u16 {
-        let header = 1u16 // message
+        let header = 1u16
             + self.detail_lines.len() as u16
             + 1; // blank line
-        let rows = 3u16; // 3 choices
+        let rows = NUM_CHOICES as u16;
+        let spacer = 1u16; // blank line before footer
         let footer = 1u16;
         let padding = menu_surface_padding_height();
-        header + rows + footer + padding
+        header + rows + spacer + footer + padding
     }
 
     pub fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -198,14 +208,13 @@ impl RetryPrompt {
 
         let mut y = content_area.y;
 
-        // Header: bold message
+        // Header
         Line::from(self.message.clone().bold()).render(
             Rect { x: content_area.x, y, width: content_area.width, height: 1 },
             buf,
         );
         y += 1;
 
-        // Detail lines
         for line in &self.detail_lines {
             if y >= content_area.y + content_area.height {
                 return;
@@ -217,10 +226,10 @@ impl RetryPrompt {
             y += 1;
         }
 
-        // Spacer
-        y += 1;
+        y += 1; // spacer
 
-        // Choices
+        // Choices — hide shortcut labels when in note mode
+        let hide_shortcuts = self.focus == Focus::Note;
         let choices = [
             ("Accept", 'a', false),
             ("Retry", 'r', true),
@@ -232,9 +241,13 @@ impl RetryPrompt {
             }
             let is_selected = self.state.selected_idx == Some(idx);
             let prefix = if is_selected { '›' } else { ' ' };
-            let default_marker = if *supports_note { " (default)" } else { "" };
+            let shortcut_part = if hide_shortcuts {
+                String::new()
+            } else {
+                format!(" ({shortcut})")
+            };
 
-            let row_text = format!("{prefix} {}. {}{default_marker} ({shortcut})", idx + 1, label);
+            let row_text = format!("{prefix} {}. {}{shortcut_part}", idx + 1, label);
             let style = if is_selected {
                 Style::default().fg(Color::Cyan).bold()
             } else {
@@ -256,7 +269,7 @@ impl RetryPrompt {
                 let remaining = content_area.width.saturating_sub(row_width).saturating_sub(3);
                 if remaining > 0 {
                     if self.focus == Focus::Note {
-                        let cursor = if self.should_show_cursor() { "▌" } else { "│" };
+                        let cursor = if self.should_show_cursor() { "█" } else { " " };
                         let note_preview = if self.note_draft.is_empty() {
                             format!(" {cursor}")
                         } else {
@@ -292,20 +305,35 @@ impl RetryPrompt {
             y += 1;
         }
 
-        // Footer hints
+        // Spacer line before footer
+        y += 1;
+
+        // Footer hints — white keys, dimmed text, centered dot separator
         if y < content_area.y + content_area.height {
-            let hints = match self.focus {
+            let sep = Span::styled(" · ", Style::default().dim());
+            let dim = Style::default().dim();
+            let white = Style::default().fg(Color::White);
+
+            let spans: Vec<Span> = match self.focus {
                 Focus::Options => vec![
-                    "tab to add retry note",
-                    "enter to confirm",
-                    "esc to abort",
+                    Span::styled("tab", white),
+                    Span::styled(" add note", dim),
+                    sep.clone(),
+                    Span::styled("enter", white),
+                    Span::styled(" confirm", dim),
+                    sep.clone(),
+                    Span::styled("esc", white),
+                    Span::styled(" abort", dim),
                 ],
                 Focus::Note => vec![
-                    "tab/esc to close note",
-                    "enter to confirm",
+                    Span::styled("tab/esc", white),
+                    Span::styled(" close note", dim),
+                    sep.clone(),
+                    Span::styled("enter", white),
+                    Span::styled(" confirm", dim),
                 ],
             };
-            Line::from(hints.join(" | ").dim()).render(
+            Line::from(spans).render(
                 Rect {
                     x: content_area.x + 2,
                     y,
