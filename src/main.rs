@@ -397,12 +397,13 @@ async fn generate_plan(
     conventions: Option<&conventions::CommitConventions>,
     long_commits: bool,
 ) -> Result<String> {
+    let model_name = client.format_model_name();
     let message = if retry_attempt == 0 {
-        "Asking Mercury to analyze your changes..."
+        format!("Asking {} to analyze your changes...", model_name)
     } else {
-        "Retrying commit plan generation..."
+        format!("Retrying with {}...", model_name)
     };
-    let spinner = spinner(message);
+    let spinner = spinner(&message);
     let result = client
         .generate_commits(
             prompt,

@@ -120,6 +120,10 @@ impl ApiClient {
         })
     }
 
+    pub fn format_model_name(&self) -> String {
+        format_model_name(&self.model)
+    }
+
     pub async fn generate_commits(
         &self,
         git_context: &str,
@@ -461,6 +465,27 @@ fn strip_outer_code_fence(s: &str) -> &str {
         Some(end_idx) => after_open[..end_idx].trim(),
         None => t,
     }
+}
+
+fn format_model_name(model: &str) -> String {
+    model
+        .split('/')
+        .last()
+        .unwrap_or(model)
+        .replace('-', " ")
+        .split(' ')
+        .map(|word| {
+            let chars: Vec<char> = word.chars().collect();
+            if chars.is_empty() {
+                String::new()
+            } else {
+                let first = chars[0].to_uppercase().to_string();
+                let rest: String = chars[1..].iter().collect();
+                format!("{}{}", first, rest)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 const BASE_SYSTEM_PROMPT: &str = r#"
