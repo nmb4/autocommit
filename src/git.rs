@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use crate::conventions::CommitConventions;
 use regex::Regex;
 use std::collections::HashMap;
+use std::fs;
+use std::path::Path;
 use std::process::Command;
 
 /// All git context we gather to pass to the model
@@ -12,6 +14,7 @@ pub struct GitContext {
     pub recent_commits: Vec<CommitInfo>,
     pub staged_diff: String,
     pub unstaged_diff: String,
+    pub untracked_diff: String,
     pub untracked_files: Vec<String>,
     pub staged_files: Vec<StagedFile>,
 }
@@ -70,6 +73,7 @@ impl GitContext {
             ],
         )?;
         let (staged_files, untracked_files) = get_status(&root)?;
+        let untracked_diff = build_untracked_diff(&root, &untracked_files)?;
 
         Ok(GitContext {
             repo_root: root,
@@ -77,6 +81,7 @@ impl GitContext {
             recent_commits,
             staged_diff,
             unstaged_diff,
+            untracked_diff,
             untracked_files,
             staged_files,
         })
@@ -87,7 +92,8 @@ impl GitContext {
     pub fn diff_volume(&self) -> usize {
         let staged_lines = self.staged_diff.lines().count();
         let unstaged_lines = self.unstaged_diff.lines().count();
-        staged_lines + unstaged_lines
+        let untracked_lines = self.untracked_diff.lines().count();
+        staged_lines + unstaged_lines + untracked_lines
     }
 
     /// Parse the unstaged diff into individual hunks with unique IDs.
@@ -198,6 +204,19 @@ impl GitContext {
             out.push_str("```\n\n");
         }
 
+        if !self.untracked_diff.is_empty() {
+            out.push_str("Untracked file contents (new files):\n```diff\n");
+            let pages = chunk_diff_by_file(&self.untracked_diff, 32000);
+            for (i, page) in pages.iter().enumerate() {
+                if pages.len() > 1 {
+                    out.push_str(&format!("=== DIFF PAGE {}/{} ===\n\n", i + 1, pages.len()));
+                }
+                out.push_str(page);
+                out.push_str("\n");
+            }
+            out.push_str("```\n\n");
+        }
+
         out
     }
 
@@ -264,6 +283,19 @@ impl GitContext {
             out.push_str("```\n\n");
         }
 
+        if !self.untracked_diff.is_empty() {
+            out.push_str("Untracked file contents (new files):\n```diff\n");
+            let pages = chunk_diff_by_file(&self.untracked_diff, 32000);
+            for (i, page) in pages.iter().enumerate() {
+                if pages.len() > 1 {
+                    out.push_str(&format!("=== DIFF PAGE {}/{} ===\n\n", i + 1, pages.len()));
+                }
+                out.push_str(page);
+                out.push_str("\n");
+            }
+            out.push_str("```\n\n");
+        }
+
         out
     }
 }
@@ -295,6 +327,60 @@ fn get_branch(root: &str) -> Result<String> {
     } else {
         Ok(branch)
     }
+}
+
+fn build_untracked_diff(root: &str, untracked_files: &[String]) -> Result<String> {
+    const MAX_BYTES_PER_FILE: usize = 16 * 1024;
+    const MAX_LINES_PER_FILE: usize = 400;
+
+    let mut out = String::new();
+    for rel_path in untracked_files {
+        let abs_path = Path::new(root).join(rel_path);
+        let bytes = match fs::read(&abs_path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        let is_binary = bytes
+            .iter()
+            .take(1024)
+            .any(|b| *b == 0);
+
+        out.push_str(&format!("diff --git a/{0} b/{0}\n", rel_path));
+        out.push_str("new file mode 100644\n");
+        out.push_str("index 0000000..0000000\n");
+        out.push_str("--- /dev/null\n");
+        out.push_str(&format!("+++ b/{}\n", rel_path));
+
+        if is_binary {
+            out.push_str("@@ -0,0 +1 @@\n");
+            out.push_str("+[binary content omitted]\n\n");
+            continue;
+        }
+
+        let clipped = &bytes[..bytes.len().min(MAX_BYTES_PER_FILE)];
+        let text = String::from_utf8_lossy(clipped);
+        let mut line_count = 0usize;
+        for line in text.lines() {
+            if line_count == 0 {
+                // Unknown final length up front; keep hunk header generic for new file.
+                out.push_str("@@ -0,0 +1,1 @@\n");
+            }
+            if line_count >= MAX_LINES_PER_FILE {
+                out.push_str("+... [content truncated]\n");
+                break;
+            }
+            out.push('+');
+            out.push_str(line);
+            out.push('\n');
+            line_count += 1;
+        }
+        if line_count == 0 {
+            out.push_str("@@ -0,0 +1,1 @@\n+\n");
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 fn get_recent_commits(root: &str, n: usize) -> Result<Vec<CommitInfo>> {

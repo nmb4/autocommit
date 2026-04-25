@@ -135,9 +135,10 @@ impl ApiClient {
                 options.retry_attempt
             ));
             if let Some(previous_output) = &options.previous_output {
+                let previous_shell = strip_outer_code_fence(previous_output.trim());
                 user_message.push_str(&format!(
                     "\n\nPrevious attempt output:\n```shell\n{}\n```",
-                    previous_output.trim()
+                    previous_shell
                 ));
             }
         }
@@ -429,6 +430,23 @@ fn truncate_for_error(s: &str, max_chars: usize) -> String {
     }
     let head: String = s.chars().take(max_chars).collect();
     format!("{}… [truncated]", head)
+}
+
+fn strip_outer_code_fence(s: &str) -> &str {
+    let t = s.trim();
+    let starts_with_fence = t.starts_with("```");
+    let ends_with_fence = t.ends_with("```");
+    if !(starts_with_fence && ends_with_fence) {
+        return t;
+    }
+    let after_open = match t.find('\n') {
+        Some(idx) => &t[idx + 1..],
+        None => return t,
+    };
+    match after_open.rfind("```") {
+        Some(end_idx) => after_open[..end_idx].trim(),
+        None => t,
+    }
 }
 
 const BASE_SYSTEM_PROMPT: &str = r#"

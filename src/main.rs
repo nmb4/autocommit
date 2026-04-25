@@ -213,7 +213,7 @@ async fn run() -> Result<()> {
         .debug_log_file
         .as_ref()
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(&ctx.repo_root).join(".autocommit-model-debug.jsonl"));
+        .unwrap_or_else(|| PathBuf::from(&ctx.repo_root).join(".git").join("autocommit-model-debug.jsonl"));
     let model_override = match provider {
         api::Provider::OpenRouter => args
             .openrouter_model
