@@ -86,6 +86,7 @@ pub struct GenerationOptions {
     pub reasoning_effort: ReasoningEffort,
     pub retry_attempt: usize,
     pub previous_output: Option<String>,
+    pub retry_note: Option<String>,
     pub long_commits: bool,
 }
 
@@ -139,6 +140,15 @@ impl ApiClient {
                 user_message.push_str(&format!(
                     "\n\nPrevious attempt output:\n```shell\n{}\n```",
                     previous_shell
+                ));
+            }
+        }
+        if let Some(retry_note) = options.retry_note.as_deref() {
+            let retry_note = retry_note.trim();
+            if !retry_note.is_empty() {
+                user_message.push_str(&format!(
+                    "\n\nUser retry instruction (highest priority):\n{}\nHonor this instruction in your next output.",
+                    retry_note
                 ));
             }
         }
@@ -236,6 +246,7 @@ impl ApiClient {
             "base_url": self.base_url,
             "model": self.model,
             "retry_attempt": options.retry_attempt,
+            "retry_note": options.retry_note,
             "reasoning_effort": format!("{:?}", options.reasoning_effort).to_lowercase(),
             "long_commits": options.long_commits,
             "system_prompt": system_prompt,
@@ -466,8 +477,12 @@ RULES:
 9. NEVER leave files staged without a corresponding commit command.
 10. Never use `git add .` or `git add -A` unless all changes genuinely belong to one commit.
 11. Prefer specific file paths when grouping makes sense.
+12. Ground every commit summary/body strictly in the provided repository context and diffs.
+13. Do not invent implementation details, architecture claims, or motivations that are not directly supported by the provided context.
+14. If context is limited, keep commit messages factual and minimal instead of speculative.
 
 IMPORTANT: Never leave any files staged without committing them.
+IMPORTANT: Always follow explicit user retry instructions when they are present.
 
 OUTPUT FORMAT:
 Output ONLY a fenced code block tagged with `shell`, containing valid shell commands. No explanation before or after. No markdown outside the code block. No comments inside the commands. Just the raw commands.
@@ -512,6 +527,7 @@ impl ApiClient {
             prompt.push_str("- Any context a future reader would need\n");
             prompt.push_str("- Breaking changes or migration notes if applicable\"\n");
             prompt.push_str("```\n");
+            prompt.push_str("Only include details that are directly supported by provided diffs/context.\n");
         } else {
             prompt.push_str("\n\n");
             prompt.push_str("SHORT COMMIT MESSAGES:\n");

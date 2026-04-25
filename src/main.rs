@@ -248,6 +248,7 @@ async fn run() -> Result<()> {
         reasoning_effort,
         0,
         None,
+        None,
         conventions.as_ref(),
         initial_long_commits,
     )
@@ -284,6 +285,7 @@ async fn review_and_execute_plan(
 ) -> Result<()> {
     let mut retry_attempt = 0;
     let mut long_commits = long_commits;
+    let mut retry_note: Option<String> = None;
 
     loop {
         let mut reset_retry_context = false;
@@ -305,7 +307,10 @@ async fn review_and_execute_plan(
                 enforce_commit_message_mode(&mut steps, long_commits);
                 match execute_or_retry(args, &steps, ctx, long_commits)? {
                 PlanAction::Execute => return Ok(()),
-                PlanAction::Retry => {
+                PlanAction::Retry { note } => {
+                    if note.is_some() {
+                        retry_note = note;
+                    }
                     println!("{} Retrying with the current commit mode.", "●".cyan());
                 }
                 PlanAction::ToggleLongCommits => {
@@ -342,6 +347,7 @@ async fn review_and_execute_plan(
             reasoning_effort,
             retry_attempt,
             previous_output,
+            retry_note.as_deref(),
             conventions,
             long_commits,
         )
@@ -366,6 +372,7 @@ async fn generate_plan(
     reasoning_effort: api::ReasoningEffort,
     retry_attempt: usize,
     previous_output: Option<&str>,
+    retry_note: Option<&str>,
     conventions: Option<&conventions::CommitConventions>,
     long_commits: bool,
 ) -> Result<String> {
@@ -382,6 +389,7 @@ async fn generate_plan(
                 reasoning_effort,
                 retry_attempt,
                 previous_output: previous_output.map(str::to_owned),
+                retry_note: retry_note.map(str::to_owned),
                 long_commits,
             },
             conventions,
@@ -458,7 +466,7 @@ fn execute_or_retry(
     if !args.yes {
         match prompt_for_plan_action(long_commits)? {
             PlanAction::Execute => {}
-            PlanAction::Retry => return Ok(PlanAction::Retry),
+            PlanAction::Retry { note } => return Ok(PlanAction::Retry { note }),
             PlanAction::ToggleLongCommits => return Ok(PlanAction::ToggleLongCommits),
             PlanAction::Abort => return Ok(PlanAction::Abort),
         }
@@ -610,7 +618,7 @@ fn spinner(msg: &str) -> ProgressBar {
 
 enum PlanAction {
     Execute,
-    Retry,
+    Retry { note: Option<String> },
     ToggleLongCommits,
     Abort,
 }
@@ -622,7 +630,15 @@ fn prompt_for_plan_action(long_commits: bool) -> Result<PlanAction> {
 
     match result {
         ActionResult::Accept => Ok(PlanAction::Execute),
-        ActionResult::Retry { note: _ } => Ok(PlanAction::Retry),
+        ActionResult::Retry { note } => {
+            let note = note.trim();
+            let note = if note.is_empty() {
+                None
+            } else {
+                Some(note.to_string())
+            };
+            Ok(PlanAction::Retry { note })
+        }
         ActionResult::ToggleLongCommits => Ok(PlanAction::ToggleLongCommits),
         ActionResult::Abort => Ok(PlanAction::Abort),
     }
