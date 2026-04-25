@@ -11,6 +11,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use parser::{ExecutionStep, ParseResult};
 use ratatui::{backend::CrosstermBackend, layout::Rect, layout::Size, Terminal};
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -147,6 +148,10 @@ struct Args {
     /// Show the git context that will be sent to the model and exit
     #[arg(long)]
     show_context: bool,
+
+    /// Path to debug log file for provider requests/responses (JSONL)
+    #[arg(long, env = "AC_DEBUG_LOG_FILE")]
+    debug_log_file: Option<String>,
 }
 
 #[tokio::main]
@@ -204,6 +209,11 @@ async fn run() -> Result<()> {
         args.inception_api_key.is_some(),
         args.openrouter_api_key.is_some(),
     )?;
+    let debug_log_path = args
+        .debug_log_file
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(&ctx.repo_root).join(".autocommit-model-debug.jsonl"));
     let model_override = match provider {
         api::Provider::OpenRouter => args
             .openrouter_model
@@ -217,6 +227,7 @@ async fn run() -> Result<()> {
         args.openrouter_api_key.clone(),
         args.base_url.clone(),
         model_override,
+        Some(debug_log_path),
     )?;
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
     let raw_output = generate_plan(

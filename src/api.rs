@@ -2,6 +2,10 @@ use anyhow::{Context, Result};
 use crate::conventions::CommitConventions;
 use serde::Serialize;
 use serde_json::Value;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const INCEPTION_BASE_URL: &str = "https://api.inceptionlabs.ai/v1";
 const INCEPTION_MODEL: &str = "mercury-2";
@@ -74,6 +78,7 @@ pub struct ApiClient {
     api_key: String,
     base_url: String,
     model: String,
+    debug_log_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +96,7 @@ impl ApiClient {
         openrouter_api_key: Option<String>,
         base_url: Option<String>,
         model: Option<String>,
+        debug_log_path: Option<PathBuf>,
     ) -> Result<Self> {
         let api_key = match provider {
             Provider::Inception => inception_api_key
@@ -106,6 +112,7 @@ impl ApiClient {
             base_url: base_url
                 .unwrap_or_else(|| provider.default_base_url().to_string()),
             model: model.unwrap_or_else(|| provider.default_model().to_string()),
+            debug_log_path,
         })
     }
 
@@ -169,6 +176,10 @@ impl ApiClient {
             reasoning,
         };
 
+        if let Err(e) = self.log_request(options, &request) {
+            eprintln!("warning: failed to write debug request log: {e}");
+        }
+
         let url = format!("{}/chat/completions", self.base_url);
 
         let resp = self
@@ -180,13 +191,22 @@ impl ApiClient {
             .await
             .context("Failed to send request to provider API")?;
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("API error {}: {}", status, body);
+        let status = resp.status();
+        let response_body = resp
+            .text()
+            .await
+            .context("Failed to read provider response body")?;
+
+        if let Err(e) = self.log_response(options, status.as_u16(), &response_body) {
+            eprintln!("warning: failed to write debug response log: {e}");
         }
 
-        let json: Value = resp.json().await.context("Failed to parse API response")?;
+        if !status.is_success() {
+            anyhow::bail!("API error {}: {}", status, response_body);
+        }
+
+        let json: Value = serde_json::from_str(&response_body)
+            .context("Failed to parse API response")?;
         extract_text_from_chat_response(&json).ok_or_else(|| {
             let snippet = serde_json::to_string(&json)
                 .map(|s| truncate_for_error(&s, 800))
@@ -194,6 +214,80 @@ impl ApiClient {
             anyhow::anyhow!("Empty textual response from API. Response snippet: {}", snippet)
         })
     }
+
+    fn log_request(&self, options: &GenerationOptions, request: &ChatRequest) -> Result<()> {
+        let Some(path) = &self.debug_log_path else {
+            return Ok(());
+        };
+
+        let (system_prompt, user_context) = match request.messages.as_slice() {
+            [sys, user, ..] => (sys.content.clone(), user.content.clone()),
+            _ => (String::new(), String::new()),
+        };
+
+        let entry = serde_json::json!({
+            "kind": "request",
+            "ts_unix_ms": unix_ms_now(),
+            "provider": match self.provider {
+                Provider::Inception => "inception",
+                Provider::OpenRouter => "openrouter",
+            },
+            "base_url": self.base_url,
+            "model": self.model,
+            "retry_attempt": options.retry_attempt,
+            "reasoning_effort": format!("{:?}", options.reasoning_effort).to_lowercase(),
+            "long_commits": options.long_commits,
+            "system_prompt": system_prompt,
+            "user_context": user_context,
+            "request_payload": request,
+        });
+
+        append_jsonl(path, &entry)
+    }
+
+    fn log_response(
+        &self,
+        options: &GenerationOptions,
+        status_code: u16,
+        response_body: &str,
+    ) -> Result<()> {
+        let Some(path) = &self.debug_log_path else {
+            return Ok(());
+        };
+
+        let entry = serde_json::json!({
+            "kind": "response",
+            "ts_unix_ms": unix_ms_now(),
+            "provider": match self.provider {
+                Provider::Inception => "inception",
+                Provider::OpenRouter => "openrouter",
+            },
+            "model": self.model,
+            "retry_attempt": options.retry_attempt,
+            "status_code": status_code,
+            "response_body": response_body,
+        });
+
+        append_jsonl(path, &entry)
+    }
+}
+
+fn unix_ms_now() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn append_jsonl(path: &PathBuf, value: &Value) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("Unable to open debug log file: {}", path.display()))?;
+    serde_json::to_writer(&mut file, value)?;
+    file.write_all(b"\n")?;
+    Ok(())
 }
 
 fn extract_text_from_chat_response(json: &Value) -> Option<String> {
