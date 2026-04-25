@@ -512,6 +512,11 @@ impl ApiClient {
             prompt.push_str("- Any context a future reader would need\n");
             prompt.push_str("- Breaking changes or migration notes if applicable\"\n");
             prompt.push_str("```\n");
+        } else {
+            prompt.push_str("\n\n");
+            prompt.push_str("SHORT COMMIT MESSAGES:\n");
+            prompt.push_str("Use exactly one `-m \"type(scope): summary\"` per commit.\n");
+            prompt.push_str("Do NOT include a second `-m` body message in short mode.\n");
         }
 
         if let Some(conv) = conventions {

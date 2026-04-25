@@ -12,6 +12,7 @@ pub struct GitContext {
     pub repo_root: String,
     pub current_branch: String,
     pub recent_commits: Vec<CommitInfo>,
+    pub prefer_long_commits: bool,
     pub staged_diff: String,
     pub unstaged_diff: String,
     pub untracked_diff: String,
@@ -48,6 +49,7 @@ impl GitContext {
 
         let current_branch = get_branch(&root)?;
         let recent_commits = get_recent_commits(&root, 10)?;
+        let prefer_long_commits = infer_long_commit_preference(&root, 20)?;
         // Use --no-ext-diff to bypass external diff tool (like difft)
         let staged_diff = run_git(
             &root,
@@ -79,6 +81,7 @@ impl GitContext {
             repo_root: root,
             current_branch,
             recent_commits,
+            prefer_long_commits,
             staged_diff,
             unstaged_diff,
             untracked_diff,
@@ -402,6 +405,34 @@ fn get_recent_commits(root: &str, n: usize) -> Result<Vec<CommitInfo>> {
         .collect();
 
     Ok(commits)
+}
+
+fn infer_long_commit_preference(root: &str, n: usize) -> Result<bool> {
+    let count = format!("-{}", n);
+    let out = run_git(root, &["log", &count, "--pretty=format:%B%x1f"])?;
+
+    let messages: Vec<&str> = out
+        .split('\x1f')
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .collect();
+
+    if messages.is_empty() {
+        return Ok(false);
+    }
+
+    let long_count = messages
+        .iter()
+        .filter(|msg| {
+            let mut lines = msg.lines();
+            let _subject = lines.next();
+            lines.any(|line| !line.trim().is_empty())
+        })
+        .count();
+
+    let total = messages.len();
+    let threshold = std::cmp::max(2, total / 2 + 1);
+    Ok(long_count >= threshold)
 }
 
 fn get_status(root: &str) -> Result<(Vec<StagedFile>, Vec<String>)> {

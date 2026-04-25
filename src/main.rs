@@ -230,6 +230,18 @@ async fn run() -> Result<()> {
         Some(debug_log_path),
     )?;
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());
+    let initial_long_commits = if args.long {
+        true
+    } else {
+        ctx.prefer_long_commits
+    };
+    if initial_long_commits && !args.long {
+        println!(
+            "{} Inferred long commit mode from recent git history.",
+            "●".cyan()
+        );
+    }
+
     let raw_output = generate_plan(
         &client,
         &prompt,
@@ -237,7 +249,7 @@ async fn run() -> Result<()> {
         0,
         None,
         conventions.as_ref(),
-        args.long,
+        initial_long_commits,
     )
     .await?;
 
@@ -255,7 +267,7 @@ async fn run() -> Result<()> {
         reasoning_effort,
         raw_output,
         conventions.as_ref(),
-        args.long,
+        initial_long_commits,
     )
     .await
 }
@@ -288,7 +300,9 @@ async fn review_and_execute_plan(
                 }
                 return Ok(());
             }
-            ParseResult::Steps(steps) => match execute_or_retry(args, &steps, ctx, long_commits)? {
+            ParseResult::Steps(mut steps) => {
+                enforce_commit_message_mode(&mut steps, long_commits);
+                match execute_or_retry(args, &steps, ctx, long_commits)? {
                 PlanAction::Execute => return Ok(()),
                 PlanAction::Retry => {
                     println!("{} Retrying with the current commit mode.", "●".cyan());
@@ -305,7 +319,8 @@ async fn review_and_execute_plan(
                     println!("{} Aborted.", "✗".red());
                     return Ok(());
                 }
-            },
+                }
+            }
         }
 
         retry_attempt += 1;
@@ -319,6 +334,17 @@ async fn review_and_execute_plan(
             long_commits,
         )
         .await?;
+    }
+}
+
+fn enforce_commit_message_mode(steps: &mut [ExecutionStep], long_commits: bool) {
+    if long_commits {
+        return;
+    }
+    for step in steps {
+        if let ExecutionStep::CommitGroup(group) = step {
+            group.body = None;
+        }
     }
 }
 
