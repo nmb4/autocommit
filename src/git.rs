@@ -455,9 +455,6 @@ fn get_status(root: &str) -> Result<(Vec<StagedFile>, Vec<String>)> {
         }
 
         if index_status == '?' && work_status == '?' {
-            if should_ignore_untracked_path(&path) {
-                continue;
-            }
             untracked.push(path);
         } else if index_status != ' ' && index_status != '?' {
             staged.push(StagedFile {
@@ -469,21 +466,6 @@ fn get_status(root: &str) -> Result<(Vec<StagedFile>, Vec<String>)> {
 
     Ok((staged, untracked))
 }
-
-fn should_ignore_untracked_path(path: &str) -> bool {
-    let file_name = Path::new(path)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(path);
-    matches!(
-        file_name,
-        ".autocommit-model-debug.jsonl"
-            | "autocommit-model-debug.jsonl"
-            | ".autocommit-debug.jsonl"
-            | "autocommit-debug.jsonl"
-    )
-}
-
 fn run_git(root: &str, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .args(["-C", root])

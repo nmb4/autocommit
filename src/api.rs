@@ -132,7 +132,7 @@ impl ApiClient {
 
         if options.retry_attempt > 0 {
             user_message.push_str(&format!(
-                "\n\nThis is retry attempt {}. Produce a different commit plan than the previous attempt while still matching the repository state.",
+                "\n\nThis is retry attempt {}. Regenerate the plan for the same repository state. Keep grouping and scope stable unless the retry instruction requires changes or you detect a concrete issue in the previous attempt.",
                 options.retry_attempt
             ));
             if let Some(previous_output) = &options.previous_output {
@@ -182,7 +182,7 @@ impl ApiClient {
                 },
             ],
             max_tokens: 2048,
-            temperature: 0.2,
+            temperature: 0.0,
             reasoning_effort,
             reasoning,
         };
@@ -480,6 +480,8 @@ RULES:
 12. Ground every commit summary/body strictly in the provided repository context and diffs.
 13. Do not invent implementation details, architecture claims, or motivations that are not directly supported by the provided context.
 14. If context is limited, keep commit messages factual and minimal instead of speculative.
+15. Prefer stable output: for the same context, keep commit grouping and message intent consistent.
+16. Only change grouping on retry when user retry instructions request it or when correcting a clear mistake.
 
 IMPORTANT: Never leave any files staged without committing them.
 IMPORTANT: Always follow explicit user retry instructions when they are present.
