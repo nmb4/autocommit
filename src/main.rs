@@ -328,7 +328,11 @@ async fn review_and_execute_plan(
                     if note.is_some() {
                         retry_note = note;
                     }
-                    println!("{} Retrying with the current commit mode.", "●".cyan());
+                    if let Some(ref note) = retry_note {
+                        println!("{} Retrying with note: {}", "●".cyan(), note);
+                    } else {
+                        println!("{} Retrying with the current commit mode.", "●".cyan());
+                    }
                 }
                 PlanAction::ToggleLongCommits => {
                     long_commits = !long_commits;
@@ -481,6 +485,7 @@ fn execute_or_retry(
 
     // ── Confirm ──────────────────────────────────────────────────────────────
     if !args.yes {
+        println!();
         match prompt_for_plan_action(long_commits)? {
             PlanAction::Execute => {}
             PlanAction::Retry { note } => return Ok(PlanAction::Retry { note }),
