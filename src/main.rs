@@ -286,6 +286,7 @@ async fn review_and_execute_plan(
     let mut long_commits = long_commits;
 
     loop {
+        let mut reset_retry_context = false;
         let parsed = parser::parse_commands(&raw_output)
             .context("Failed to parse model output into git commands")?;
 
@@ -314,6 +315,7 @@ async fn review_and_execute_plan(
                         "●".cyan(),
                         if long_commits { "long" } else { "short" }
                     );
+                    reset_retry_context = true;
                 }
                 PlanAction::Abort => {
                     println!("{} Aborted.", "✗".red());
@@ -323,13 +325,23 @@ async fn review_and_execute_plan(
             }
         }
 
-        retry_attempt += 1;
+        if reset_retry_context {
+            retry_attempt = 0;
+        } else {
+            retry_attempt += 1;
+        }
+        let previous_output = if reset_retry_context {
+            None
+        } else {
+            Some(raw_output.as_str())
+        };
+
         raw_output = generate_plan(
             client,
             prompt,
             reasoning_effort,
             retry_attempt,
-            Some(raw_output.as_str()),
+            previous_output,
             conventions,
             long_commits,
         )
