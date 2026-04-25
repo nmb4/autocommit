@@ -87,6 +87,18 @@ impl ReasoningEffortArg {
     }
 }
 
+fn parse_temperature(input: &str) -> Result<f32, String> {
+    let value: f32 = input
+        .parse()
+        .map_err(|_| format!("invalid float: {input}"))?;
+    if !(0.0..=2.0).contains(&value) {
+        return Err(format!(
+            "temperature must be between 0.0 and 2.0 (got {value})"
+        ));
+    }
+    Ok(value)
+}
+
 /// autocommit — AI-powered git commit message generator
 ///
 /// Analyzes your repository's staged and unstaged changes, then uses the
@@ -132,6 +144,10 @@ struct Args {
     /// Reasoning effort: auto (default), instant, low, or high. Auto selects based on diff volume.
     #[arg(short = 'r', long, value_enum, default_value = "auto")]
     reasoning: ReasoningEffortArg,
+
+    /// Sampling temperature for model output (0.0 to 2.0, default: 0.1)
+    #[arg(long, env = "AC_TEMPERATURE", default_value_t = 0.1, value_parser = parse_temperature)]
+    temperature: f32,
 
     /// Use long (multiline) commit messages with a body explaining the change
     #[arg(short = 'l', long)]
@@ -227,6 +243,7 @@ async fn run() -> Result<()> {
         args.openrouter_api_key.clone(),
         args.base_url.clone(),
         model_override,
+        args.temperature,
         Some(debug_log_path),
     )?;
     let reasoning_effort = args.reasoning.resolve(ctx.diff_volume());

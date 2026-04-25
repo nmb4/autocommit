@@ -78,6 +78,7 @@ pub struct ApiClient {
     api_key: String,
     base_url: String,
     model: String,
+    temperature: f32,
     debug_log_path: Option<PathBuf>,
 }
 
@@ -97,6 +98,7 @@ impl ApiClient {
         openrouter_api_key: Option<String>,
         base_url: Option<String>,
         model: Option<String>,
+        temperature: f32,
         debug_log_path: Option<PathBuf>,
     ) -> Result<Self> {
         let api_key = match provider {
@@ -113,6 +115,7 @@ impl ApiClient {
             base_url: base_url
                 .unwrap_or_else(|| provider.default_base_url().to_string()),
             model: model.unwrap_or_else(|| provider.default_model().to_string()),
+            temperature,
             debug_log_path,
         })
     }
@@ -182,7 +185,7 @@ impl ApiClient {
                 },
             ],
             max_tokens: 2048,
-            temperature: 0.0,
+            temperature: self.temperature,
             reasoning_effort,
             reasoning,
         };
