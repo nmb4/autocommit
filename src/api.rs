@@ -10,7 +10,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const INCEPTION_BASE_URL: &str = "https://api.inceptionlabs.ai/v1";
 const INCEPTION_MODEL: &str = "mercury-2";
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
-const OPENROUTER_MODEL: &str = "inclusionai/ling-2.6-1t:free";
+const OPENROUTER_FALLBACK_MODELS: &[&str] = &[
+    "cohere/north-mini-code:free",
+    "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "openai/gpt-oss-120b:free",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provider {
@@ -29,7 +34,7 @@ impl Provider {
     fn default_model(self) -> &'static str {
         match self {
             Provider::Inception => INCEPTION_MODEL,
-            Provider::OpenRouter => OPENROUTER_MODEL,
+            Provider::OpenRouter => OPENROUTER_FALLBACK_MODELS[0],
         }
     }
 }
@@ -52,6 +57,8 @@ impl Default for ReasoningEffort {
 #[derive(Debug, Serialize)]
 struct ChatRequest {
     model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    models: Option<Vec<String>>,
     messages: Vec<Message>,
     max_tokens: u32,
     temperature: f32,
@@ -78,6 +85,7 @@ pub struct ApiClient {
     api_key: String,
     base_url: String,
     model: String,
+    model_fallbacks: Option<Vec<String>>,
     temperature: f32,
     debug_log_path: Option<PathBuf>,
 }
@@ -108,13 +116,29 @@ impl ApiClient {
                 .context("Missing OpenRouter API key (set AC_OR_KEY or pass --or-key)")?,
         };
 
+        let (model, model_fallbacks) = match model {
+            Some(model) => (model, None),
+            None if provider == Provider::OpenRouter => {
+                let fallbacks = OPENROUTER_FALLBACK_MODELS[1..]
+                    .iter()
+                    .map(|m| (*m).to_string())
+                    .collect::<Vec<_>>();
+                (
+                    OPENROUTER_FALLBACK_MODELS[0].to_string(),
+                    Some(fallbacks),
+                )
+            }
+            None => (provider.default_model().to_string(), None),
+        };
+
         Ok(ApiClient {
             client: reqwest::Client::new(),
             provider,
             api_key,
             base_url: base_url
                 .unwrap_or_else(|| provider.default_base_url().to_string()),
-            model: model.unwrap_or_else(|| provider.default_model().to_string()),
+            model,
+            model_fallbacks,
             temperature,
             debug_log_path,
         })
@@ -178,6 +202,7 @@ impl ApiClient {
 
         let request = ChatRequest {
             model: self.model.clone(),
+            models: self.model_fallbacks.clone(),
             messages: vec![
                 Message {
                     role: "system".to_string(),
@@ -252,6 +277,7 @@ impl ApiClient {
             },
             "base_url": self.base_url,
             "model": self.model,
+            "model_fallbacks": self.model_fallbacks,
             "retry_attempt": options.retry_attempt,
             "retry_note": options.retry_note,
             "reasoning_effort": format!("{:?}", options.reasoning_effort).to_lowercase(),

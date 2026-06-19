@@ -44,13 +44,13 @@ impl ProviderArg {
             ProviderArg::Inception => Ok(api::Provider::Inception),
             ProviderArg::Openrouter => Ok(api::Provider::OpenRouter),
             ProviderArg::Auto => {
-                if has_inception_key {
-                    Ok(api::Provider::Inception)
-                } else if has_openrouter_key {
+                if has_openrouter_key {
                     Ok(api::Provider::OpenRouter)
+                } else if has_inception_key {
+                    Ok(api::Provider::Inception)
                 } else {
                     anyhow::bail!(
-                        "No API key found. Set INCEPTION_API_KEY or AC_OR_KEY, or pass --api-key/--or-key."
+                        "No API key found. Set AC_OR_KEY or INCEPTION_API_KEY, or pass --or-key/--api-key."
                     )
                 }
             }
@@ -117,7 +117,7 @@ struct Args {
     #[arg(short, long, default_value = ".")]
     path: String,
 
-    /// API provider: auto (default), inception, or openrouter
+    /// API provider: auto (default, prefers OpenRouter), inception, or openrouter
     #[arg(long, value_enum, default_value = "auto")]
     provider: ProviderArg,
 
@@ -486,7 +486,6 @@ fn execute_or_retry(
 
     // ── Confirm ──────────────────────────────────────────────────────────────
     if !args.yes {
-        println!();
         match prompt_for_plan_action(long_commits)? {
             PlanAction::Execute => {}
             PlanAction::Retry { note } => return Ok(PlanAction::Retry { note }),
